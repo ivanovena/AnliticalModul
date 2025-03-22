@@ -1,0 +1,38 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: broker-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: broker-service
+  template:
+    metadata:
+      labels:
+        app: broker-service
+    spec:
+      containers:
+      - name: broker
+        image: broker-service:latest
+        env:
+        - name: KAFKA_BROKER
+          value: "kafka:9092"
+        - name: AGENT_TOPIC
+          value: "agent_decisions"
+        - name: INITIAL_CASH
+          value: "100000"
+        - name: TELEGRAM_BOT_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: telegram-secrets
+              key: TELEGRAM_BOT_TOKEN
+        - name: FMP_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: fmp-secrets
+              key: FMP_API_KEY
+        - name: USE_DATALAKE
+          value: "false"
+        ports:
+        - containerPort: 8000

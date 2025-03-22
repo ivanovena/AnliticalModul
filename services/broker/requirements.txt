@@ -1,0 +1,14 @@
+fastapi
+uvicorn
+kafka-python
+python-dotenv
+pydantic
+scikit-learn
+spacy
+transformers
+torch
+python-telegram-bot
+faiss-cpu
+datasets
+requests
+nltk

@@ -1,0 +1,7 @@
+SQLAlchemy
+psycopg2-binary
+scikit-learn
+pandas
+kafka-python
+python-dotenv
+joblib
