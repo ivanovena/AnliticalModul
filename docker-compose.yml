@@ -1,0 +1,295 @@
+networks:
+  project7_network:
+    driver: bridge
+
+services:
+  postgres:
+    image: postgres:14
+    environment:
+      - POSTGRES_USER=market_admin
+      - POSTGRES_PASSWORD=password
+      - POSTGRES_DB=market_data
+      - POSTGRES_INITDB_ARGS=--encoding=UTF-8 --locale=en_US.UTF-8
+      - PGDATA=/var/lib/postgresql/data/pgdata
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init-scripts:/docker-entrypoint-initdb.d
+      - postgres_backups:/backups
+    ports:
+      - "5432:5432"
+    networks:
+      - project7_network
+    restart: always
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U market_admin -d market_data"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    command: >
+      postgres
+        -c shared_buffers=256MB
+        -c max_connections=200
+        -c effective_cache_size=512MB
+        -c maintenance_work_mem=128MB
+        -c checkpoint_completion_target=0.9
+        -c wal_buffers=16MB
+        -c default_statistics_target=100
+        -c random_page_cost=1.1
+        -c effective_io_concurrency=200
+        -c work_mem=16MB
+        -c min_wal_size=1GB
+        -c max_wal_size=4GB
+        -c max_worker_processes=8
+        -c max_parallel_workers_per_gather=4
+        -c max_parallel_workers=8
+        -c max_parallel_maintenance_workers=4
+        
+  postgres_backup:
+    image: postgres:14
+    volumes:
+      - postgres_data:/var/lib/postgresql/data:ro
+      - postgres_backups:/backups
+    environment:
+      - POSTGRES_USER=market_admin
+      - POSTGRES_PASSWORD=password
+      - POSTGRES_DB=market_data
+    networks:
+      - project7_network
+    restart: always
+    depends_on:
+      - postgres
+    entrypoint: |
+      bash -c '
+        mkdir -p /backups
+        while true; do
+          TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+          pg_dump -h postgres -U market_admin market_data | gzip > /backups/market_data_$$TIMESTAMP.sql.gz
+          find /backups -name "market_data_*.sql.gz" -type f -mtime +7 -delete
+          echo "Backup completed: /backups/market_data_$$TIMESTAMP.sql.gz"
+          sleep 86400  # Backup diario (24 horas)
+        done
+      '
+
+  zookeeper:
+    image: bitnami/zookeeper:3.8.1
+    ports:
+      - "2181:2181"
+    environment:
+      - ALLOW_ANONYMOUS_LOGIN=yes
+    volumes:
+      - zookeeper_data:/bitnami/zookeeper
+    networks:
+      - project7_network
+    restart: always
+
+  kafka:
+    image: bitnami/kafka:3.3.2
+    ports:
+      - "9092:9092"
+    environment:
+      - KAFKA_BROKER_ID=1
+      - KAFKA_CFG_LISTENERS=PLAINTEXT://:9092
+      - KAFKA_CFG_ADVERTISED_LISTENERS=PLAINTEXT://kafka:9092
+      - KAFKA_CFG_ZOOKEEPER_CONNECT=zookeeper:2181
+      - ALLOW_PLAINTEXT_LISTENER=yes
+      - KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE=true
+      - KAFKA_CFG_TOPIC_CREATE_TOPICS=ingestion_events:1:1,streaming_events:1:1,batch_events:1:1,agent_decisions:1:1,final_predictions:1:1,model_performance:1:1,transfer_learning_events:1:1
+    volumes:
+      - kafka_data:/bitnami/kafka
+    depends_on:
+      - zookeeper
+    networks:
+      - project7_network
+    restart: always
+  
+  ingestion:
+    build:
+      context: ./services/ingestion
+      dockerfile: Dockerfile
+    volumes:
+      - ./services/ingestion:/app
+    environment:
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      - FMP_API_KEY=h5JPnHPAdjxBAXAGwTOL3Acs3W5zaByx
+      - FMP_BASE_URL=https://financialmodelingprep.com/api/v3
+      - KAFKA_BROKER=kafka:9092
+      - INGESTION_TOPIC=ingestion_events
+      - DB_URI=postgresql://market_admin:password@postgres:5432/market_data
+    ports:
+      - "8000:8000"
+      - "8080:8080"
+    depends_on:
+      - kafka
+      - postgres
+    networks:
+      - project7_network
+    restart: always
+    entrypoint: ["sh", "/app/init_ingestion.sh"]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+  
+  batch:
+    build:
+      context: ./services/batch
+      dockerfile: Dockerfile
+    volumes:
+      - ./services/batch:/app
+      - models_data:/models
+    environment:
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      - KAFKA_BROKER=kafka:9092
+      - KAFKA_TOPIC=batch_events
+      - DB_URI=postgresql://market_admin:password@postgres:5432/market_data
+      - MODEL_OUTPUT_PATH=/models
+    ports:
+      - "8003:8003"
+    depends_on:
+      - kafka
+      - postgres
+    networks:
+      - project7_network
+    restart: always
+    entrypoint: ["sh", "/app/init_batch.sh", "scheduled"]
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 6G
+        reservations:
+          cpus: '1'
+          memory: 4G
+    healthcheck:
+      test: ["CMD", "test", "-d", "/models"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+  
+  broker:
+    build:
+      context: ./services/broker
+      dockerfile: Dockerfile
+    volumes:
+      - ./services/broker:/app
+      - broker_models:/app/models
+    environment:
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      - KAFKA_BROKER=kafka:9092
+      - AGENT_TOPIC=agent_decisions
+      - INITIAL_CASH=100000
+      - FMP_API_KEY=h5JPnHPAdjxBAXAGwTOL3Acs3W5zaByx
+      - USE_DATALAKE=false
+      - TELEGRAM_BOT_TOKEN= # Dejamos vacío para evitar errores
+      # Variables para LLama
+      - LLAMA_CPP_ENABLE_MLOCK=0
+      - LLAMA_CPP_MAX_BATCH_SIZE=8
+      - LLAMA_CPP_SEED=42
+      - LLAMA_MODEL_PATH=/app/models/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf
+    ports:
+      - "8001:8001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+        reservations:
+          memory: 2G
+    depends_on:
+      - kafka
+    networks:
+      - project7_network
+    restart: always
+    entrypoint: ["sh", "/app/init_broker.sh"]
+  
+  streaming:
+    build:
+      context: ./services/streaming
+      dockerfile: Dockerfile
+    volumes:
+      - ./services/streaming:/app
+    environment:
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      - KAFKA_BROKER=kafka:9092
+      - INGESTION_TOPIC=ingestion_events
+      - STREAMING_TOPIC=streaming_events
+      - FMP_API_KEY=h5JPnHPAdjxBAXAGwTOL3Acs3W5zaByx
+      - FMP_BASE_URL=https://financialmodelingprep.com/api/v3
+      - LOG_LEVEL=INFO
+      - MODEL_OUTPUT_PATH=/models
+    ports:
+      - "8002:8001"
+      - "8090:8090"
+    depends_on:
+      - kafka
+    networks:
+      - project7_network
+    restart: always
+    entrypoint: ["sh", "/app/init_streaming.sh"]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8090/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      
+  frontend:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+    ports:
+      - "80:80"
+    depends_on:
+      - ingestion
+      - broker
+      - streaming
+    networks:
+      - project7_network
+    restart: always
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/healthcheck.html"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  zookeeper_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${PWD}/data/zookeeper_data
+  kafka_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${PWD}/data/kafka_data
+  postgres_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${PWD}/data/postgres_data
+  broker_models:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${PWD}/data/broker_models
+  models_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${PWD}/data/models_data
+  postgres_backups:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${PWD}/backups/postgres

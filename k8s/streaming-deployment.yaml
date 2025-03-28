@@ -1,0 +1,121 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: streaming
+  labels:
+    app: streaming
+    component: real-time-processing
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: streaming
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels:
+        app: streaming
+        component: real-time-processing
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"
+        prometheus.io/path: "/metrics"
+    spec:
+      containers:
+      - name: streaming
+        image: market-model-streaming:latest
+        imagePullPolicy: IfNotPresent
+        resources:
+          requests:
+            memory: "1Gi"
+            cpu: "500m"
+          limits:
+            memory: "2Gi"
+            cpu: "1000m"
+        env:
+        - name: KAFKA_BROKER
+          valueFrom:
+            configMapKeyRef:
+              name: global-config
+              key: KAFKA_BROKER
+        - name: INGESTION_TOPIC
+          valueFrom:
+            configMapKeyRef:
+              name: global-config
+              key: INGESTION_TOPIC
+        - name: STREAMING_TOPIC
+          valueFrom:
+            configMapKeyRef:
+              name: global-config
+              key: STREAMING_TOPIC
+        - name: LOG_LEVEL
+          valueFrom:
+            configMapKeyRef:
+              name: global-config
+              key: LOG_LEVEL
+        livenessProbe:
+          exec:
+            command:
+            - python
+            - -c
+            - "import os, sys; sys.exit(0 if os.path.exists('/tmp/service_healthy') else 1)"
+          initialDelaySeconds: 30
+          periodSeconds: 30
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          exec:
+            command:
+            - python
+            - -c
+            - "import os, sys; sys.exit(0 if os.path.exists('/tmp/service_healthy') else 1)"
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          timeoutSeconds: 5
+          successThreshold: 1
+          failureThreshold: 3
+        volumeMounts:
+        - name: model-storage
+          mountPath: /app/models
+        - name: log-volume
+          mountPath: /app/logs
+      volumes:
+      - name: model-storage
+        persistentVolumeClaim:
+          claimName: streaming-models-pvc
+      - name: log-volume
+        emptyDir: {}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: streaming
+  labels:
+    app: streaming
+    component: real-time-processing
+spec:
+  selector:
+    app: streaming
+  ports:
+  - name: http
+    port: 8000
+    targetPort: 8000
+  type: ClusterIP
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: streaming-models-pvc
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 1Gi
+  storageClassName: standard

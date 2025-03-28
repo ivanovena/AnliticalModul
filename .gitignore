@@ -1,0 +1,57 @@
+# Archivos de sistema
+.DS_Store
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Logs
+logs/
+*.log
+
+# Datos sensibles y variables de entorno
+.env
+.env.local
+.env.development
+.env.test
+.env.production
+
+# Directorios de datos y modelos
+data/
+models/
+backups/
+
+# Dependencias y archivos de construcción
+node_modules/
+package-lock.json
+.pnp/
+.pnp.js
+
+# Archivos de caché
+__pycache__/
+.cache/
+.pytest_cache/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/ 

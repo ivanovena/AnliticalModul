@@ -3,4 +3,38 @@ kind: ConfigMap
 metadata:
   name: global-config
 data:
-  USE_DATALAKE: "false"
+  # Environment settings
+  ENVIRONMENT: "production"
+  USE_DATALAKE: "true"
+  LOG_LEVEL: "info"
+  
+  # Service connection settings
+  KAFKA_BROKER: "kafka:9092"
+  POSTGRES_HOST: "postgres"
+  POSTGRES_PORT: "5432"
+  POSTGRES_DB: "market_data"
+  
+  # Kafka topics
+  INGESTION_TOPIC: "ingestion_events"
+  STREAMING_TOPIC: "streaming_events"
+  BATCH_TOPIC: "batch_events"
+  AGENT_TOPIC: "agent_decisions"
+  
+  # Trading parameters
+  INITIAL_CASH: "100000"
+  DEFAULT_COMMISSION: "0.001"
+  RISK_TOLERANCE: "medium"
+  
+  # API settings
+  FMP_BASE_URL: "https://financialmodelingprep.com/api/v3"
+  CORS_ORIGINS: "http://localhost:3000,https://market-app.example.com"
+  
+  # Monitoring
+  ENABLE_METRICS: "true"
+  PROMETHEUS_ENDPOINT: "/metrics"
+  
+  # Feature flags
+  ENABLE_AI_ADVISOR: "true"
+  ENABLE_AUTOMATIC_TRADING: "false"
+  ENABLE_RISK_ANALYSIS: "true"
+  ENABLE_PORTFOLIO_OPTIMIZATION: "true"

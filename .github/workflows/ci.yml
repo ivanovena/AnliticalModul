@@ -1,0 +1,209 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:14-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: test_market_data
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      
+      kafka:
+        image: bitnami/kafka:latest
+        env:
+          KAFKA_CFG_ZOOKEEPER_CONNECT: zookeeper:2181
+          ALLOW_PLAINTEXT_LISTENER: yes
+        ports:
+          - 9092:9092
+        options: >-
+          --health-cmd "kafka-topics.sh --list --bootstrap-server localhost:9092"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      
+      zookeeper:
+        image: bitnami/zookeeper:latest
+        env:
+          ALLOW_ANONYMOUS_LOGIN: yes
+        ports:
+          - 2181:2181
+
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+    
+    - name: Cache pip packages
+      uses: actions/cache@v3
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+        pip install pytest pytest-cov flake8 black mypy
+        python -m spacy download en_core_web_md
+    
+    - name: Lint with flake8
+      run: |
+        # stop the build if there are Python syntax errors or undefined names
+        flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+        # exit-zero treats all errors as warnings
+        flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+    
+    - name: Check code format with black
+      run: |
+        black --check .
+    
+    - name: Type check with mypy
+      run: |
+        mypy --ignore-missing-imports .
+    
+    - name: Test with pytest
+      run: |
+        pytest --cov=services tests/
+      env:
+        DB_URI: postgresql://postgres:postgres@localhost:5432/test_market_data
+        KAFKA_BROKER: localhost:9092
+        FMP_API_KEY: ${{ secrets.FMP_API_KEY }}
+    
+    - name: Upload coverage to Codecov
+      uses: codecov/codecov-action@v3
+      with:
+        fail_ci_if_error: false
+
+  build-and-push:
+    needs: test
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
+    runs-on: ubuntu-latest
+    
+    strategy:
+      matrix:
+        service: [ingestion, broker, streaming, batch, web]
+    
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v2
+    
+    - name: Login to DockerHub
+      uses: docker/login-action@v2
+      with:
+        username: ${{ secrets.DOCKERHUB_USERNAME }}
+        password: ${{ secrets.DOCKERHUB_TOKEN }}
+    
+    - name: Extract branch name
+      shell: bash
+      run: echo "BRANCH_NAME=$(echo ${GITHUB_REF#refs/heads/})" >> $GITHUB_ENV
+    
+    - name: Build and push
+      uses: docker/build-push-action@v4
+      with:
+        context: ./services/${{ matrix.service }}
+        push: true
+        tags: ${{ secrets.DOCKERHUB_USERNAME }}/market-model-${{ matrix.service }}:${{ env.BRANCH_NAME }}-${{ github.sha }},${{ secrets.DOCKERHUB_USERNAME }}/market-model-${{ matrix.service }}:latest
+        cache-from: type=registry,ref=${{ secrets.DOCKERHUB_USERNAME }}/market-model-${{ matrix.service }}:buildcache
+        cache-to: type=registry,ref=${{ secrets.DOCKERHUB_USERNAME }}/market-model-${{ matrix.service }}:buildcache,mode=max
+
+  deploy-dev:
+    needs: build-and-push
+    if: github.event_name == 'push' && github.ref == 'refs/heads/develop'
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Install kubectl
+      uses: azure/setup-kubectl@v3
+      with:
+        version: 'latest'
+    
+    - name: Set Kubernetes context
+      uses: azure/k8s-set-context@v3
+      with:
+        kubeconfig: ${{ secrets.KUBE_CONFIG_DEV }}
+    
+    - name: Deploy to development
+      run: |
+        # Update image tags in Kubernetes manifests
+        for service in ingestion broker streaming batch web; do
+          sed -i "s|image: .*/$service:.*|image: ${{ secrets.DOCKERHUB_USERNAME }}/market-model-$service:develop-${{ github.sha }}|g" k8s/$service-deployment.yaml
+          kubectl apply -f k8s/$service-deployment.yaml
+        done
+        
+        # Apply other Kubernetes resources
+        kubectl apply -f k8s/configmap.yaml
+        kubectl apply -f k8s/secrets.yaml
+        kubectl apply -f k8s/postgres-pvc.yaml
+        kubectl apply -f k8s/postgres-deployment.yaml
+        kubectl apply -f k8s/postgres-service.yaml
+        kubectl apply -f k8s/kafka-deployment.yaml
+        kubectl apply -f k8s/kafka-service.yaml
+        kubectl apply -f k8s/zookeeper-deployment.yaml
+        kubectl apply -f k8s/zookeeper-service.yaml
+
+  deploy-prod:
+    needs: build-and-push
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: production
+    
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Install kubectl
+      uses: azure/setup-kubectl@v3
+      with:
+        version: 'latest'
+    
+    - name: Set Kubernetes context
+      uses: azure/k8s-set-context@v3
+      with:
+        kubeconfig: ${{ secrets.KUBE_CONFIG_PROD }}
+    
+    - name: Deploy to production
+      run: |
+        # Update image tags in Kubernetes manifests
+        for service in ingestion broker streaming batch web; do
+          sed -i "s|image: .*/$service:.*|image: ${{ secrets.DOCKERHUB_USERNAME }}/market-model-$service:main-${{ github.sha }}|g" k8s/$service-deployment.yaml
+          kubectl apply -f k8s/$service-deployment.yaml
+        done
+        
+        # Apply other Kubernetes resources
+        kubectl apply -f k8s/configmap.yaml
+        kubectl apply -f k8s/secrets.yaml
+        kubectl apply -f k8s/postgres-pvc.yaml
+        kubectl apply -f k8s/postgres-deployment.yaml
+        kubectl apply -f k8s/postgres-service.yaml
+        kubectl apply -f k8s/kafka-deployment.yaml
+        kubectl apply -f k8s/kafka-service.yaml
+        kubectl apply -f k8s/zookeeper-deployment.yaml
+        kubectl apply -f k8s/zookeeper-service.yaml
+        
+        # Apply monitoring resources
+        kubectl apply -f k8s/prometheus.yaml
+        kubectl apply -f k8s/grafana.yaml

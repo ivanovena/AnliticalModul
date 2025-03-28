@@ -1,0 +1,168 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: batch
+  labels:
+    app: batch
+    component: model-training
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: batch
+  strategy:
+    type: Recreate  # Since batch jobs are stateful, we use Recreate
+  template:
+    metadata:
+      labels:
+        app: batch
+        component: model-training
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"
+        prometheus.io/path: "/metrics"
+    spec:
+      containers:
+      - name: batch
+        image: market-model-batch:latest
+        imagePullPolicy: IfNotPresent
+        resources:
+          requests:
+            memory: "4Gi"
+            cpu: "2000m"
+          limits:
+            memory: "8Gi"
+            cpu: "4000m"
+        env:
+        - name: DB_URI
+          value: "postgresql://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@postgres:5432/$(POSTGRES_DB)"
+        - name: POSTGRES_USER
+          valueFrom:
+            secretKeyRef:
+              name: db-credentials
+              key: POSTGRES_USER
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: db-credentials
+              key: POSTGRES_PASSWORD
+        - name: POSTGRES_DB
+          valueFrom:
+            configMapKeyRef:
+              name: global-config
+              key: POSTGRES_DB
+        - name: KAFKA_BROKER
+          valueFrom:
+            configMapKeyRef:
+              name: global-config
+              key: KAFKA_BROKER
+        - name: KAFKA_TOPIC
+          valueFrom:
+            configMapKeyRef:
+              name: global-config
+              key: BATCH_TOPIC
+        - name: MODEL_OUTPUT_PATH
+          value: "/models"
+        - name: LOG_LEVEL
+          valueFrom:
+            configMapKeyRef:
+              name: global-config
+              key: LOG_LEVEL
+        volumeMounts:
+        - name: model-storage
+          mountPath: /models
+        - name: log-volume
+          mountPath: /app/logs
+      volumes:
+      - name: model-storage
+        persistentVolumeClaim:
+          claimName: batch-models-pvc
+      - name: log-volume
+        emptyDir: {}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: batch
+  labels:
+    app: batch
+    component: model-training
+spec:
+  selector:
+    app: batch
+  ports:
+  - name: http
+    port: 8000
+    targetPort: 8000
+  type: ClusterIP
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: batch-models-pvc
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 10Gi
+  storageClassName: standard
+
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: batch-training-job
+spec:
+  schedule: "0 0 * * *"  # Run daily at midnight
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+          - name: batch-training
+            image: market-model-batch:latest
+            imagePullPolicy: IfNotPresent
+            env:
+            - name: DB_URI
+              value: "postgresql://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@postgres:5432/$(POSTGRES_DB)"
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: db-credentials
+                  key: POSTGRES_USER
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: db-credentials
+                  key: POSTGRES_PASSWORD
+            - name: POSTGRES_DB
+              valueFrom:
+                configMapKeyRef:
+                  name: global-config
+                  key: POSTGRES_DB
+            - name: KAFKA_BROKER
+              valueFrom:
+                configMapKeyRef:
+                  name: global-config
+                  key: KAFKA_BROKER
+            - name: KAFKA_TOPIC
+              valueFrom:
+                configMapKeyRef:
+                  name: global-config
+                  key: BATCH_TOPIC
+            - name: MODEL_OUTPUT_PATH
+              value: "/models"
+            - name: TRAINING_MODE
+              value: "full"
+            volumeMounts:
+            - name: model-storage
+              mountPath: /models
+          restartPolicy: OnFailure
+          volumes:
+          - name: model-storage
+            persistentVolumeClaim:
+              claimName: batch-models-pvc

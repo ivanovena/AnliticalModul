@@ -1,0 +1,128 @@
+/* src/App.css */
+
+/* Layout general */
+.layout {
+  min-height: 100vh;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  padding: 0 24px;
+  background: #fff;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+  position: fixed;
+  width: 100%;
+  z-index: 1;
+}
+
+.logo {
+  font-size: 20px;
+  font-weight: bold;
+  color: #1890ff;
+  margin-right: 24px;
+}
+
+.content {
+  padding: 24px;
+  margin-top: 64px;
+  background: #f0f2f5;
+}
+
+.site-layout-content {
+  background: #f0f2f5;
+  padding: 24px;
+  min-height: 280px;
+}
+
+.search-container {
+  margin-left: auto;
+}
+
+/* Tarjetas del portfolio */
+.portfolio-summary {
+  margin-bottom: 24px;
+}
+
+.summary-card {
+  text-align: center;
+  padding: 16px;
+}
+
+.bg-light-blue {
+  background-color: #e6f7ff;
+}
+
+.bg-light-green {
+  background-color: #f6ffed;
+}
+
+.bg-light-purple {
+  background-color: #f9f0ff;
+}
+
+/* Secciones de contenido */
+.content-section {
+  background: #fff;
+  padding: 24px;
+  border-radius: 4px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+  margin-bottom: 24px;
+}
+
+.button-container {
+  margin-bottom: 16px;
+}
+
+/* Estilos para valores positivos/negativos */
+.positive-value {
+  color: #52c41a;
+}
+
+.negative-value {
+  color: #f5222d;
+}
+
+/* Simulador de trading */
+.trading-simulator {
+  margin-bottom: 24px;
+}
+
+.simulation-results {
+  margin-top: 16px;
+  margin-bottom: 16px;
+}
+
+/* Error message */
+.error-message {
+  padding: 16px;
+  background-color: #fff2f0;
+  border: 1px solid #ffccc7;
+  border-radius: 4px;
+  color: #f5222d;
+  margin-bottom: 16px;
+}
+
+/* Responsive adjustments */
+@media (max-width: 768px) {
+  .header {
+    flex-direction: column;
+    height: auto;
+    padding: 16px;
+  }
+  
+  .logo {
+    margin-bottom: 16px;
+  }
+  
+  .search-container {
+    margin-left: 0;
+    margin-top: 16px;
+    width: 100%;
+  }
+  
+  .content {
+    margin-top: 200px;
+    padding: 16px;
+  }
+}
