@@ -11,6 +11,9 @@ from river import linear_model, preprocessing, feature_extraction, ensemble, com
 from config import KAFKA_BROKER, INGESTION_TOPIC, STREAMING_TOPIC, FMP_API_KEY, FMP_BASE_URL
 from flask import Flask, jsonify
 import threading
+import asyncio
+import websockets
+import os
 
 # Importar nuestros modelos personalizados primero para evitar errores
 from custom_models import ALMARegressor
@@ -198,7 +201,7 @@ def run_health_server():
 
 # Configuración de logging
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
         logging.FileHandler("streaming_service.log"),
@@ -230,12 +233,15 @@ except Exception as e:
     raise
 
 # Función para obtener datos históricos
-def fetch_historical_data(symbol, interval='1min', limit=30):
+def fetch_historical_data(symbol, interval='5min', limit=30):
     """
     Obtiene datos históricos para complementar los eventos en tiempo real
     """
     try:
-        url = f"{FMP_BASE_URL}/historical-chart/{interval}/{symbol}?apikey={FMP_API_KEY}&limit={limit}"
+        # Usar el endpoint /stable/ directamente como sugiere la documentación más reciente encontrada
+        stable_base_url = "https://financialmodelingprep.com/stable"
+        url = f"{stable_base_url}/historical-chart/{interval}/{symbol}?apikey={FMP_API_KEY}&limit={limit}"
+        logger.debug(f"Llamando a la URL de FMP: {url}") # Log para verificar la URL usada
         response = requests.get(url, timeout=10)
         response.raise_for_status()
         data = response.json()
@@ -251,6 +257,18 @@ def extract_advanced_features(event, historical_data):
     """
     features = {}
     
+    # Ordenar datos históricos por timestamp descendente (más reciente primero)
+    # Asegurarse de que 'timestamp' existe y es numérico
+    try:
+        historical_data.sort(key=lambda x: float(x.get('timestamp', 0)), reverse=True)
+        # Log para depurar los datos históricos ordenados
+        if historical_data:
+            recent_closes = [h.get('close') for h in historical_data[:10]] # Primeros 10 cierres
+            logger.debug(f"Primeros 10 cierres históricos (ordenados): {recent_closes}")
+    except (TypeError, ValueError) as e:
+        logger.warning(f"No se pudieron ordenar los datos históricos por timestamp: {e}")
+        # Continuar sin ordenar si hay error, pero loguear
+
     # Características básicas del evento actual
     for key in ['open', 'high', 'low', 'close', 'volume']:
         if key in event:
@@ -269,10 +287,15 @@ def extract_advanced_features(event, historical_data):
         if len(hist_close) > 5:
             # Características de tendencia
             features['sma_5'] = np.mean(hist_close[:5])
-            features['price_momentum'] = hist_close[0] - hist_close[5] if len(hist_close) > 5 else 0
+            # Calcular momentum como: precio actual - precio de hace 5 periodos
+            # Asumiendo hist_close[0] es t-1, hist_close[4] es t-5
+            if len(hist_close) >= 5 and 'close' in features:
+                 features['price_momentum'] = features['close'] - hist_close[4]
+            else:
+                 features['price_momentum'] = 0 # Valor por defecto si no hay suficientes datos o falta el cierre actual
             
-            # Volatilidad
-            features['volatility'] = np.std(hist_close[:10]) if len(hist_close) > 10 else 0
+            # Volatilidad (sobre los 10 más recientes)
+            features['volatility'] = np.std(hist_close[:10]) if len(hist_close) >= 10 else 0
             
             # Volumen relativo
             features['rel_volume'] = features.get('volume', 0) / np.mean(hist_volume) if np.mean(hist_volume) > 0 else 1
@@ -299,7 +322,7 @@ class OnlineModelManager:
                     models=[
                         linear_model.LinearRegression(),
                         linear_model.PARegressor(),
-                        linear_model.ALMARegressor(alpha=0.1, window_size=10)  # Instancia explícita con parámetros
+                        linear_model.ALMARegressor(alpha=0.1, window_size=30)  # Ventana ampliada de 10 a 30
                     ],
                     # weights=None  # Pesos uniformes para comenzar - parámetro eliminado
                 ))
@@ -329,27 +352,46 @@ class OnlineModelManager:
         Actualiza el modelo para un símbolo específico
         """
         model, metrics_tracker = self.get_or_create_model(symbol)
-        
         try:
-            # Hacer predicción antes de aprender
             prediction = model.predict_one(features)
-            metrics_tracker['predictions'].append(prediction)
-            metrics_tracker['actuals'].append(target)
-            
-            # Actualizar métricas
-            metrics_tracker['mae'].update(target, prediction)
-            metrics_tracker['rmse'].update(target, prediction)
-            metrics_tracker['r2'].update(target, prediction)
-            
-            # Estimar importancia de features basado en uso reciente
-            self._update_feature_importance(symbol, features, prediction, target)
-            
-            # Aprender del nuevo dato
-            model.learn_one(features, target)
-            
-            return prediction
+
+            # Ensure both prediction and target are valid floats before metric updates
+            valid_prediction = isinstance(prediction, (int, float))
+            valid_target = isinstance(target, (int, float))
+
+            if valid_prediction and valid_target:
+                # Cast to float for safety before metric updates
+                float_prediction = float(prediction)
+                float_target = float(target)
+
+                metrics_tracker['predictions'].append(float_prediction)
+                metrics_tracker['actuals'].append(float_target)
+
+                metrics_tracker['mae'].update(float_target, float_prediction)
+                metrics_tracker['rmse'].update(float_target, float_prediction)
+                metrics_tracker['r2'].update(float_target, float_prediction)
+
+                self._update_feature_importance(symbol, features, float_prediction, float_target)
+
+            elif prediction is None:
+                 logger.debug(f"Predicción fue None para {symbol}, saltando actualización de métricas.")
+            else:
+                 # Log if prediction or target are not valid numbers (and not None)
+                 logger.warning(f"Predicción o target inválidos para {symbol}. "
+                                f"Predicción: {prediction} (Tipo: {type(prediction)}), "
+                                f"Target: {target} (Tipo: {type(target)}). Saltando métricas.")
+
+            # Always try to learn to fill the buffer, ensure target is float
+            if valid_target:
+                 model.learn_one(features, float(target))
+            else:
+                 logger.warning(f"Target inválido para {symbol} en learn_one: {target} (Tipo: {type(target)}) ")
+
+            return prediction # Return original prediction (could be None)
+
         except Exception as e:
-            logger.error(f"Error updating model for {symbol}: {e}")
+            # Log the full traceback for better debugging
+            logger.error(f"Error updating model for {symbol}: {e}", exc_info=True)
             return None
     
     def _update_feature_importance(self, symbol, features, prediction, target):
@@ -434,40 +476,61 @@ def process_streaming_event(event: Dict[str, Any]):
     """
     Procesa un evento de streaming, extrayendo características y generando predicciones
     """
+    # Log inicial del evento recibido
+    logger.info(f"--- Procesando Evento --- Evento crudo: {event}")
+
     if not event or 'symbol' not in event:
-        logger.warning("Evento inválido recibido")
+        logger.warning("Evento inválido recibido, saltando.")
         return None
 
     symbol = event['symbol']
-    
+    logger.info(f"Símbolo: {symbol}")
+
     try:
         # Obtener datos históricos complementarios
-        historical_data = fetch_historical_data(symbol)
-        
+        # Nota: fetch_historical_data puede ser lento y bloquear, considerar async si es un problema
+        historical_data = fetch_historical_data(symbol, interval='5min')
+        logger.debug(f"Datos históricos para {symbol}: {historical_data[:2]}... (primeros 2)") # Log reducido
+
         # Extraer características avanzadas
         features = extract_advanced_features(event, historical_data)
-        
-        # Preparar valor objetivo 
-        # En un escenario real, esto podría ser el precio futuro o cambio de precio
-        target = features.get('close', event.get('close', 0)) * 1.01  # Ejemplo: predecir 1% de aumento
-        
+        logger.info(f"Características extraídas para {symbol}: {features}")
+
+        # Preparar valor objetivo
+        close_price = features.get('close', event.get('close', 0))
+        # Asegurarse de que close_price sea un número válido antes de calcular target
+        if isinstance(close_price, (int, float)):
+             target = float(close_price) * 1.01
+             logger.info(f"Target calculado para {symbol}: {target} (basado en close={close_price})")
+        else:
+             logger.warning(f"Precio de cierre inválido para {symbol}: {close_price}. No se puede calcular target.")
+             target = None # Marcar como None si no se puede calcular
+
         # Obtener o crear modelo para este símbolo
         model, metrics = model_manager.get_or_create_model(symbol)
-        
+
         # Hacer predicción y actualizar modelo
-        prediction = model_manager.update_model(symbol, features, target)
-        
+        # Asegurarse de que target es válido antes de pasar a update_model
+        if target is not None:
+            prediction = model_manager.update_model(symbol, features, target)
+            logger.info(f"Predicción obtenida de update_model para {symbol}: {prediction}")
+        else:
+            # Si target es inválido, no podemos actualizar el modelo ni obtener predicción fiable
+            logger.warning(f"Target inválido para {symbol}, no se actualiza ni predice el modelo.")
+            prediction = None # O manejar de otra forma si se requiere una predicción incluso sin target
+
         if prediction is None:
-            logger.warning(f"No se pudo generar predicción para {symbol}")
+            logger.warning(f"No se pudo generar predicción final para {symbol}")
             return None
-        
+
         # Obtener la base de conocimiento actualizada
         knowledge_base = model_manager.get_knowledge_base(symbol)
-        
+
         # Crear evento de predicción para Kafka
         prediction_event = {
             "symbol": symbol,
-            "prediction": prediction,
+            # Asegurarse que la predicción sea float antes de enviar
+            "prediction": float(prediction) if isinstance(prediction, (int, float)) else 0.0,
             "timestamp": time.time(),
             "features": features,
             "model_metrics": {
@@ -482,11 +545,11 @@ def process_streaming_event(event: Dict[str, Any]):
             },
             "model_type": "online"  # Identificar como modelo online
         }
-        
+        logger.info(f"--- Evento Procesado --- Evento de predicción: {prediction_event}")
         return prediction_event
-    
+
     except Exception as e:
-        logger.error(f"Error procesando evento para {symbol}: {e}")
+        logger.error(f"Error procesando evento para {symbol}: {e}", exc_info=True) # Añadir traceback
         return None
 
 def send_prediction_to_kafka(prediction_event):
@@ -518,52 +581,167 @@ health_metrics = {
     'estado': 'healthy'
 }
 
-def main():
-    """
-    Bucle principal de procesamiento de streaming
-    """
-    # Iniciar el servidor de health check en un hilo separado
+# --- WebSocket Server --- 
+connected_prediction_clients = set()
+
+async def notify_prediction_clients(message):
+    if connected_prediction_clients:
+        # Convertir a JSON si no lo es ya
+        if not isinstance(message, str):
+            message = json.dumps(message)
+        await asyncio.wait([client.send(message) for client in connected_prediction_clients])
+
+async def prediction_websocket_handler(websocket, path):
+    connected_prediction_clients.add(websocket)
+    logger.info(f"Cliente WebSocket de predicción conectado: {websocket.remote_address}")
+    try:
+        async for message in websocket:
+            # Podríamos manejar peticiones de símbolos específicos aquí si quisiéramos
+            logger.info(f"Mensaje recibido de WS predicción (ignorado): {message}")
+    except websockets.exceptions.ConnectionClosed:
+        logger.info(f"Cliente WebSocket de predicción desconectado: {websocket.remote_address}")
+    finally:
+        connected_prediction_clients.remove(websocket)
+
+async def start_prediction_websocket_server():
+    host = os.environ.get('WEBSOCKET_HOST', '0.0.0.0') # Reutilizar variable si existe
+    port = int(os.environ.get('WEBSOCKET_STREAMING_PORT', 8091)) # Cambiado a 8091 y variable de entorno específica
+    server = await websockets.serve(prediction_websocket_handler, host, port)
+    logger.info(f"Servidor WebSocket de Predicción escuchando en {host}:{port}")
+    await server.wait_closed()
+# --- Fin WebSocket Server ---
+
+class StreamingProcessor:
+    # ... (init y otras funciones) ...
+    async def _process_message(self, message: Dict[str, Any]):
+        # ... (código existente para procesar y obtener predicción) ...
+        try:
+            # ... (código para generar features y prediction) ...
+            
+            # Actualizar predicciones internas
+            prediction_data = {
+                "symbol": symbol,
+                "current_price": price_data.get("close", price_data.get("price", 0)),
+                "predictions": prediction,
+                "features": features,
+                "timestamp": datetime.now().isoformat(),
+                "is_fallback": False,
+                "model_metrics": self.model_manager.get_model_metrics(symbol) # Añadir métricas
+            }
+            self.predictions[symbol] = prediction_data
+            self.last_update[symbol] = time.time()
+            
+            # Publicar predicción en Kafka
+            await self.kafka_client.produce(STREAMING_TOPIC, prediction_data)
+            
+            # --- NUEVO: Notificar a clientes WS --- 
+            await notify_prediction_clients(prediction_data)
+            # --- FIN NUEVO ---
+            
+            # Resetear contador de errores
+            # ... (código existente) ...
+            
+            logger.debug(f"Procesado mensaje para {symbol} y generada predicción")
+            
+        except Exception as e:
+            # ... (manejo de errores) ...
+            raise
+
+    async def _use_fallback_data(self, symbol: str):
+        # ... (código existente) ...
+        try:
+            # ... (obtener fallback_prediction) ...
+            if fallback_prediction:
+                # ... (código existente) ...
+                # --- NUEVO: Notificar fallback a clientes WS --- 
+                await notify_prediction_clients(fallback_prediction)
+                # --- FIN NUEVO ---
+                logger.info(f"Aplicados datos de respaldo para {symbol}")
+        except Exception as e:
+            logger.error(f"Error al aplicar datos de respaldo para {symbol}: {str(e)}")
+
+# ... (otras funciones)
+
+if __name__ == "__main__":
+    logger.info("Iniciando servicio de streaming...")
+
+    # Event loop for asyncio tasks (WebSocket notifications)
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
+    # Start WebSocket server in a separate thread managed by the asyncio loop
+    websocket_thread = threading.Thread(
+        target=lambda: loop.run_until_complete(start_prediction_websocket_server()),
+        daemon=True
+    )
+    websocket_thread.start()
+    logger.info("Servidor WebSocket de predicción iniciado en hilo separado.")
+
+    # Start Flask health server in a separate thread
     health_thread = threading.Thread(target=run_health_server, daemon=True)
     health_thread.start()
-    logger.info("Servidor de health check iniciado en puerto 8090")
-    
-    logger.info("Iniciando servicio de streaming en tiempo real")
-    
+    logger.info("Servidor de Health Check iniciado en hilo separado.")
+
+    # Main loop to consume Kafka messages
+    logger.info("Iniciando consumo de mensajes Kafka...")
     try:
         for message in consumer:
             try:
-                # Procesar evento
                 event = message.value
-                health_metrics['ultimo_evento'] = time.time()
-                health_metrics['eventos_procesados'] += 1
-                
-                # Generar predicción
-                prediction_event = process_streaming_event(event)
-                
-                if prediction_event:
-                    # Enviar predicción a Kafka
-                    if send_prediction_to_kafka(prediction_event):
-                        health_metrics['predicciones_enviadas'] += 1
-                
-                # Log de estado cada 100 eventos
-                if health_metrics['eventos_procesados'] % 100 == 0:
-                    logger.info(f"Estado del servicio: "
-                                f"Eventos={health_metrics['eventos_procesados']}, "
-                                f"Predicciones={health_metrics['predicciones_enviadas']}")
-            
-            except Exception as e:
-                health_metrics['errores'] += 1
-                logger.error(f"Error procesando mensaje: {e}")
-    
-    except KeyboardInterrupt:
-        logger.info("Servicio de streaming detenido por el usuario")
-    
-    except Exception as e:
-        logger.critical(f"Error crítico en servicio de streaming: {e}")
-    
-    finally:
-        consumer.close()
-        producer.close()
+                health_metrics['ultimo_evento'] = datetime.now().isoformat() # Update health metric
 
-if __name__ == "__main__":
-    main()
+                if event:
+                    logger.debug(f"Mensaje recibido de Kafka: {event}")
+                    prediction_event = process_streaming_event(event)
+
+                    if prediction_event:
+                        # Send prediction to Kafka topic
+                        sent = send_prediction_to_kafka(prediction_event)
+                        if sent:
+                            health_metrics['predicciones_enviadas'] += 1
+                            # --- NUEVO: Notificar a clientes WS ---
+                            # Ensure notification happens in the correct loop
+                            asyncio.run_coroutine_threadsafe(notify_prediction_clients(prediction_event), loop)
+                            logger.debug(f"Notificación WebSocket enviada para {prediction_event['symbol']}")
+                        else:
+                            health_metrics['errores'] += 1
+                    else:
+                        logger.warning(f"No se generó evento de predicción para el mensaje: {event}")
+                        health_metrics['errores'] += 1
+
+                    health_metrics['eventos_procesados'] += 1
+
+                else:
+                    logger.warning("Mensaje de Kafka vacío o inválido recibido.")
+                    health_metrics['errores'] += 1
+
+            except json.JSONDecodeError as e:
+                logger.error(f"Error deserializando mensaje de Kafka: {e} - Mensaje: {message.value}")
+                health_metrics['errores'] += 1
+            except Exception as e:
+                logger.error(f"Error inesperado procesando mensaje de Kafka: {e}", exc_info=True)
+                health_metrics['errores'] += 1
+
+    except KeyboardInterrupt:
+        logger.info("Interrupción recibida, deteniendo consumidor Kafka...")
+    except KafkaError as e:
+        logger.critical(f"Error irrecuperable de Kafka: {e}", exc_info=True)
+        health_metrics['estado'] = 'error'
+    except Exception as e:
+        logger.critical(f"Error crítico en el bucle principal de consumo: {e}", exc_info=True)
+        health_metrics['estado'] = 'error'
+    finally:
+        logger.info("Cerrando consumidor Kafka...")
+        if consumer:
+            consumer.close()
+        logger.info("Cerrando productor Kafka...")
+        if producer:
+            producer.close()
+        # Attempt to stop the asyncio loop gracefully if needed
+        if loop.is_running():
+            loop.call_soon_threadsafe(loop.stop)
+        logger.info("Servicio de streaming detenido.")
+

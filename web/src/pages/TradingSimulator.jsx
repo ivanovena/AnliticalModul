@@ -14,7 +14,8 @@ import TransactionHistory from '../components/trading/TransactionHistory';
 import StrategyAdvisor from '../components/trading/StrategyAdvisor';
 
 const TradingSimulator = () => {
-  const { portfolio, metrics, transactions, loading: portfolioLoading } = usePortfolio();
+  console.log('TradingSimulator: Component rendering/re-rendering.');
+  const { portfolio, metrics, transactions, initialCash, loading: portfolioLoading, updateInitialCash, resetPortfolio } = usePortfolio();
   const { marketData, watchlist, selectedTimeframe, changeTimeframe } = useMarketData();
   const { predictions, verificationResults, fetchPredictions } = usePrediction();
   const { modelStatus } = useModelStatus();
@@ -22,6 +23,8 @@ const TradingSimulator = () => {
   const [selectedSymbol, setSelectedSymbol] = useState('AAPL');
   const [viewMode, setViewMode] = useState('split'); // split, chart, predictions
   const [showStrategyPanel, setShowStrategyPanel] = useState(false);
+  const [showPortfolioSettings, setShowPortfolioSettings] = useState(false);
+  const [newInitialCash, setNewInitialCash] = useState(initialCash);
   
   // Cargar datos para el símbolo seleccionado
   useEffect(() => {
@@ -30,8 +33,19 @@ const TradingSimulator = () => {
     }
   }, [selectedSymbol, fetchPredictions]);
   
-  // Calcular métricas para el símbolo seleccionado
-  const position = portfolio.positions[selectedSymbol] || null;
+  // Comprobación principal para estado de carga o error del portfolio
+  if (portfolioLoading) {
+    return <div className="p-4 text-center">Cargando datos de la cartera...</div>;
+  }
+
+  // Nota: Dejamos la comprobación !portfolio aquí por si acaso, aunque el contexto debería manejarlo.
+  if (!portfolio) {
+    return <div className="p-4 text-center text-red-600">Error al cargar la cartera. No se puede mostrar el simulador.</div>;
+  }
+
+  // Calcular métricas para el símbolo seleccionado (con protecciones)
+  console.log('TradingSimulator: About to calculate position. Portfolio:', JSON.stringify(portfolio, null, 2));
+  const position = (portfolio && portfolio.positions) ? (portfolio.positions[selectedSymbol] || null) : null;
   const currentPrice = marketData[selectedSymbol]?.quote?.price || 
                      predictions[selectedSymbol]?.currentPrice || 0;
   
@@ -41,6 +55,64 @@ const TradingSimulator = () => {
   const handleSymbolChange = (event) => {
     setSelectedSymbol(event.target.value);
   };
+
+  // Función para actualizar el capital inicial
+  const handleUpdateInitialCash = () => {
+    updateInitialCash(parseFloat(newInitialCash));
+    setShowPortfolioSettings(false);
+  };
+
+  // Modal de configuración de cartera
+  const PortfolioSettingsModal = () => (
+    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+      <div className="bg-white rounded-lg p-6 max-w-md w-full">
+        <div className="flex justify-between items-center mb-4">
+          <h2 className="text-lg font-bold">Configuración de Cartera</h2>
+          <button 
+            className="text-gray-500 hover:text-gray-700"
+            onClick={() => setShowPortfolioSettings(false)}
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+        
+        <div className="mb-4">
+          <label className="block text-sm text-gray-600 mb-2">Capital Inicial ($)</label>
+          <input
+            type="number"
+            className="w-full p-2 border rounded"
+            value={newInitialCash}
+            onChange={(e) => setNewInitialCash(Math.max(1000, parseFloat(e.target.value) || 1000))}
+            min="1000"
+            step="1000"
+          />
+          <p className="text-xs text-gray-500 mt-1">Valor mínimo: $1,000</p>
+        </div>
+        
+        <div className="flex space-x-2">
+          <button
+            className="flex-1 py-2 bg-indigo-600 text-white rounded hover:bg-indigo-700"
+            onClick={handleUpdateInitialCash}
+          >
+            Guardar
+          </button>
+          <button
+            className="flex-1 py-2 bg-red-100 text-red-700 rounded hover:bg-red-200"
+            onClick={() => {
+              if (window.confirm('¿Estás seguro? Esto eliminará todas tus posiciones y transacciones.')) {
+                resetPortfolio();
+                setShowPortfolioSettings(false);
+              }
+            }}
+          >
+            Reiniciar Cartera
+          </button>
+        </div>
+      </div>
+    </div>
+  );
 
   return (
     <div className="space-y-4">
@@ -61,11 +133,11 @@ const TradingSimulator = () => {
               </select>
               <div className="text-xl font-semibold">
                 ${currentPrice.toFixed(2)}
-                {marketData[selectedSymbol]?.quote?.change && (
+                {marketData[selectedSymbol]?.quote?.change != null && (
                   <span className={`ml-2 text-sm ${marketData[selectedSymbol]?.quote?.change >= 0 ? 'text-green-600' : 'text-red-600'}`}>
                     {marketData[selectedSymbol]?.quote?.change >= 0 ? '+' : ''}
                     {marketData[selectedSymbol]?.quote?.change.toFixed(2)} 
-                    ({marketData[selectedSymbol]?.quote?.percentChange.toFixed(2)}%)
+                    ({(marketData[selectedSymbol]?.quote?.percentChange ?? 0).toFixed(2)}%)
                   </span>
                 )}
               </div>
@@ -109,9 +181,20 @@ const TradingSimulator = () => {
           </div>
         </div>
         <div className="col-span-1">
-          <PortfolioSummary portfolio={portfolio} metrics={metrics} />
+          <div className="flex flex-col h-full">
+            {/* Restaurado: PortfolioSummary comentado por precaución mientras probamos */} 
+            {/* <PortfolioSummary portfolio={portfolio} metrics={metrics} /> */}
+            <button
+              className="mt-2 text-xs text-indigo-600 hover:text-indigo-800 self-end"
+              onClick={() => setShowPortfolioSettings(true)}
+            >
+              Configurar Cartera
+            </button>
+          </div>
         </div>
       </div>
+      
+      {showPortfolioSettings && <PortfolioSettingsModal />}
       
       {/* Panel de estrategia (expandible/colapsable) */}
       {showStrategyPanel && (
@@ -146,8 +229,6 @@ const TradingSimulator = () => {
               />
             </div>
           )}
-          
-          {/* Tabla de predicciones */}
           {(viewMode === 'split' || viewMode === 'predictions') && (
             <div className="bg-white rounded-lg shadow p-4">
               <PredictionTable 
@@ -157,8 +238,6 @@ const TradingSimulator = () => {
               />
             </div>
           )}
-          
-          {/* Historial de transacciones */}
           {viewMode !== 'split' && (
             <div className="bg-white rounded-lg shadow p-4">
               <TransactionHistory 
@@ -178,7 +257,7 @@ const TradingSimulator = () => {
                 symbol={selectedSymbol}
                 currentPrice={currentPrice}
                 position={position}
-                cash={portfolio.cash}
+                cash={portfolio?.cash ?? 0} // Protección añadida aquí
               />
             </div>
             

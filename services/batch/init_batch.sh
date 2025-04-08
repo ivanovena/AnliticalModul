@@ -20,7 +20,9 @@ done
 echo "Kafka está disponible"
 
 # Crear directorios necesarios
-mkdir -p $MODEL_OUTPUT_PATH
+# Asegurar que el directorio de modelos siempre exista con un valor por defecto
+MODEL_DIR="${MODEL_STORAGE_PATH:-/app/models}"
+mkdir -p "$MODEL_DIR"
 
 # Si existe un argumento para modo programado
 if [ "$1" = "scheduled" ]; then

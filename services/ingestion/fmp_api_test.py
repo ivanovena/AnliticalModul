@@ -4,8 +4,20 @@ from datetime import datetime, timedelta
 
 def test_fmp_endpoints():
     # Cargar configuración desde variables de entorno
-    API_KEY = os.environ.get('FMP_API_KEY')
-    BASE_URL = os.environ.get('FMP_BASE_URL')
+    API_KEY = os.environ.get('FMP_API_KEY', 'h5JPnHPAdjxBAXAGwTOL3Acs3W5zaByx')
+    BASE_URL = os.environ.get('FMP_BASE_URL', 'https://financialmodelingprep.com/api/v3')
+    
+    # Comprobar que tengamos valores válidos
+    if not BASE_URL:
+        print("❌ Error: FMP_BASE_URL no está configurado o es inválido")
+        return False
+    
+    if not API_KEY:
+        print("❌ Error: FMP_API_KEY no está configurado o es inválido")
+        return False
+    
+    print(f"Usando URL base: {BASE_URL}")
+    print(f"Usando API key: {'*****' + API_KEY[-4:] if API_KEY else 'None'}")
     
     # Símbolos de prueba
     SYMBOLS = ['AAPL', 'GOOGL', 'MSFT', 'IAG.MC']

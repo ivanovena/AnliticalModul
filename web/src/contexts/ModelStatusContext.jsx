@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import { api } from '../services/api';
 import { useNotification } from './NotificationContext';
+import { getModelStatus } from '../services/api';
 
 // Crear contexto
 const ModelStatusContext = createContext();
@@ -61,11 +62,14 @@ export const ModelStatusProvider = ({ children }) => {
   const fetchModelStatus = useCallback(async () => {
     setLoading(true);
     try {
-      const response = await api.getModelStatus();
+      // Llamar directamente a la función importada
+      const statusData = await getModelStatus();
+      setModelStatus(statusData);
+      setError(null);
       
       // Verificar si el estado de algún modelo cambió a degradado o crítico
       const previousStatus = modelStatus;
-      Object.entries(response).forEach(([modelType, status]) => {
+      Object.entries(statusData).forEach(([modelType, status]) => {
         if (modelType !== 'lastUpdated' && status.status !== previousStatus[modelType]?.status) {
           if (status.status === 'degraded' || status.status === 'critical') {
             addNotification({
@@ -82,12 +86,10 @@ export const ModelStatusProvider = ({ children }) => {
           }
         }
       });
-      
-      setModelStatus(response);
-      setLoading(false);
     } catch (err) {
       console.error('Error al obtener estado de modelos:', err);
-      setError('No se pudo cargar el estado de los modelos');
+      setError('No se pudo obtener el estado de los modelos.');
+    } finally {
       setLoading(false);
     }
   }, [addNotification, modelStatus]);

@@ -7,6 +7,10 @@ import threading
 from datetime import datetime, timedelta
 from sqlalchemy import create_engine, text
 from kafka import KafkaProducer
+import math
+from threading import Thread
+import asyncio
+import websockets
 
 # Configurar logging
 logging.basicConfig(
@@ -20,11 +24,13 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Variables de entorno
-FMP_API_KEY = os.environ.get('FMP_API_KEY')
+FMP_API_KEY = os.environ.get('FMP_API_KEY', 'h5JPnHPAdjxBAXAGwTOL3Acs3W5zaByx')
 FMP_BASE_URL = os.environ.get('FMP_BASE_URL', 'https://financialmodelingprep.com/api/v3')
+FMP_STABLE_URL = os.environ.get('FMP_STABLE_URL', 'https://financialmodelingprep.com/stable')
 KAFKA_BROKER = os.environ.get('KAFKA_BROKER', 'kafka:9092') 
 INGESTION_TOPIC = os.environ.get('INGESTION_TOPIC', 'ingestion_events')
-DB_URI = os.environ.get('DB_URI', 'postgresql://market_admin:password@postgres:5432/market_data')
+DB_URI = os.environ.get('DB_URI', 'postgresql://postgres:postgres@postgres:5432/trading')
+REALTIME_INTERVAL_SECONDS = int(os.environ.get('REALTIME_INTERVAL_SECONDS', 300))  # 5 minutos por defecto
 
 # Crear conexión a PostgreSQL
 engine = create_engine(DB_URI)
@@ -40,21 +46,53 @@ except Exception as e:
     logger.error(f"Error initializing Kafka producer: {e}")
     producer = None
 
+# --- WebSocket Server --- 
+connected_clients = set()
+
+async def notify_clients(message):
+    if connected_clients:
+        # Ensure the loop is running when sending messages
+        loop = asyncio.get_running_loop()
+        await asyncio.wait([loop.create_task(client.send(message)) for client in connected_clients])
+
+async def websocket_handler(websocket):
+    connected_clients.add(websocket)
+    logger.info(f"Cliente WebSocket conectado: {websocket.remote_address}")
+    try:
+        async for message in websocket:
+            # No se espera que los clientes envíen mensajes en este caso
+            logger.info(f"Mensaje recibido de WS (ignorado): {message}")
+    except websockets.exceptions.ConnectionClosed:
+        logger.info(f"Cliente WebSocket desconectado: {websocket.remote_address}")
+    finally:
+        connected_clients.remove(websocket)
+
+async def start_websocket_server():
+    host = os.environ.get('WEBSOCKET_HOST', '0.0.0.0')
+    port = int(os.environ.get('WEBSOCKET_PORT', 8080))
+    server = await websockets.serve(websocket_handler, host, port)
+    logger.info(f"Servidor WebSocket escuchando en {host}:{port}")
+    await server.wait_closed()
+# --- Fin WebSocket Server ---
+
 class IngestionManager:
     """Gestor de ingesta de datos financieros"""
     
-    def __init__(self, api_key, base_url, db_engine, kafka_producer=None):
-        self.api_key = api_key
-        self.base_url = base_url
+    def __init__(self, api_key, base_url, db_engine):
+        self.api_key = api_key if api_key else 'h5JPnHPAdjxBAXAGwTOL3Acs3W5zaByx'
+        self.base_url = base_url if base_url else 'https://financialmodelingprep.com/api/v3'
+        self.stable_url = FMP_STABLE_URL
         self.db_engine = db_engine
-        self.kafka_producer = kafka_producer
+        self.kafka_producer = producer
         # Caché para las últimas fechas de datos (evita consultas repetidas a la BD)
         self.last_dates_cache = {}
         # Tiempo de expiración de la caché en segundos (30 minutos)
         self.cache_expiry = 30 * 60
         # Última actualización de la caché
         self.cache_last_update = {}
-        logger.info("IngestionManager initialized")
+        # Para evitar procesar duplicados en tiempo real
+        self.last_processed_timestamps = {}
+        logger.info(f"IngestionManager initialized with API_KEY: {'*****' if self.api_key else 'None'}, BASE_URL: {self.base_url}")
     
     def get_last_date_for_symbol_and_type(self, symbol, data_type):
         """Obtener la fecha más reciente para un símbolo y tipo de datos específico"""
@@ -166,6 +204,80 @@ class IngestionManager:
         
         return None
     
+    # NUEVA FUNCIÓN: Obtener el último punto de datos de 5 minutos (tiempo casi real)
+    def fetch_latest_5min_data(self, symbol):
+        """
+        Obtiene sólo el último punto de datos de 5 minutos para un símbolo desde la API FMP.
+        Esta función se utiliza para alimentar el stream de eventos "en tiempo real".
+        """
+        try:
+            # Usar el endpoint /stable/ que sabemos que funciona para intervalo de 5min
+            url = f"{self.stable_url}/historical-chart/5min?symbol={symbol}&apikey={self.api_key}&limit=1"
+            logger.debug(f"Fetching latest 5min data for {symbol} from URL: {url}")
+            
+            response = requests.get(url, timeout=10)
+            response.raise_for_status()  # Lanzar excepción para códigos de error HTTP
+            
+            data = response.json()
+            
+            if not data or not isinstance(data, list) or len(data) == 0:
+                logger.warning(f"No 5min data returned for {symbol} or empty response")
+                return None
+            
+            # Tomar sólo el primer punto (el más reciente)
+            latest_point = data[0]
+            
+            # Verificar que estén todos los campos necesarios
+            required_fields = ['date', 'open', 'high', 'low', 'close', 'volume']
+            if not all(field in latest_point for field in required_fields):
+                logger.warning(f"Missing required fields in 5min data for {symbol}: {latest_point}")
+                return None
+            
+            # Convertir la fecha a timestamp
+            datetime_str = latest_point['date']
+            try:
+                record_datetime = datetime.strptime(datetime_str, '%Y-%m-%d %H:%M:%S')
+                record_timestamp = int(record_datetime.timestamp())
+            except ValueError as e:
+                logger.error(f"Error parsing datetime '{datetime_str}' for {symbol}: {e}")
+                return None
+            
+            # Verificar si este punto ya ha sido procesado anteriormente
+            if symbol in self.last_processed_timestamps and self.last_processed_timestamps[symbol] >= record_timestamp:
+                logger.debug(f"Skipping already processed 5min data point for {symbol} at {datetime_str}")
+                return None
+            
+            # Crear objeto con formato estándar
+            data_point = {
+                'symbol': symbol,
+                'price': float(latest_point['close']),
+                'change': None,  # No disponible en datos históricos
+                'change_percent': None,  # No disponible en datos históricos
+                'volume': int(latest_point['volume']),
+                'timestamp': record_timestamp,
+                'datetime': datetime_str,
+                'data_type': 'realtime_5min',  # Tipo especial para diferenciar del histórico
+                'open': float(latest_point['open']),
+                'high': float(latest_point['high']),
+                'low': float(latest_point['low']),
+                'close': float(latest_point['close']),
+                'market_cap': None  # No disponible en datos históricos
+            }
+            
+            # Actualizar el último timestamp procesado
+            self.last_processed_timestamps[symbol] = record_timestamp
+            
+            return data_point
+            
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Request error fetching latest 5min data for {symbol}: {e}")
+        except json.JSONDecodeError as e:
+            logger.error(f"JSON decode error in 5min data for {symbol}: {e}")
+        except Exception as e:
+            logger.error(f"Unexpected error fetching latest 5min data for {symbol}: {e}", exc_info=True)
+        
+        return None
+    
     def fetch_intraday_data(self, symbol, interval, start_date, end_date):
         """Obtener datos históricos intradía"""
         try:
@@ -173,9 +285,11 @@ class IngestionManager:
             start_str = start_date.strftime('%Y-%m-%d')
             end_str = end_date.strftime('%Y-%m-%d')
             
+            # Construir URL con formato correcto para la API de FMP
             url = f"{self.base_url}/historical-chart/{interval}/{symbol}?from={start_str}&to={end_str}&apikey={self.api_key}"
-            logger.info(f"Fetching {interval} data for {symbol} from {start_str} to {end_str} with URL: {url}")
+            logger.info(f"Fetching {interval} data for {symbol} from {start_str} to {end_str}")
             
+            # Realizar la petición con timeout adecuado
             response = requests.get(url, timeout=30)
             
             if response.status_code == 200:
@@ -186,41 +300,47 @@ class IngestionManager:
                     processed_data = []
                     data_type = f"intraday_{interval}"
                     
-                    # Obtener la última fecha en la BD para este símbolo y tipo
-                    last_date = self.get_last_date_for_symbol_and_type(symbol, data_type)
+                    # No necesitamos verificar la última fecha global aquí, ya que ahora estamos 
+                    # iterando correctamente en la función principal y filtramos duplicados
                     
                     for item in data:
-                        # Determinar el data_type correcto basado en el intervalo
-                        datetime_str = item.get('date')
-                        record_timestamp = int(datetime.strptime(datetime_str, '%Y-%m-%d %H:%M:%S').timestamp())
-                        record_datetime = datetime.strptime(datetime_str, '%Y-%m-%d %H:%M:%S')
-                        
-                        # Si tenemos una fecha más reciente en la BD, saltamos este registro
-                        if last_date and record_datetime <= last_date:
-                            logger.debug(f"Skipping {interval} data point for {symbol} at {datetime_str} (already in DB)")
-                            continue
+                        try:
+                            # Procesar fecha y timestamp
+                            datetime_str = item.get('date')
+                            if not datetime_str:
+                                logger.warning(f"Missing date in data point for {symbol} {interval}")
+                                continue
+                                
+                            record_datetime = datetime.strptime(datetime_str, '%Y-%m-%d %H:%M:%S')
+                            record_timestamp = int(record_datetime.timestamp())
                             
-                        # Verificar si este registro específico ya existe
-                        if self.check_record_exists(symbol, data_type, datetime_str):
-                            logger.debug(f"Skipping duplicate {interval} data point for {symbol} at {datetime_str}")
-                            continue
-                        
-                        record = {
-                            'symbol': symbol,
-                            'price': item.get('close'),  # Usamos close como precio actual
-                            'change': None,  # No disponible en datos históricos
-                            'change_percent': None,  # No disponible en datos históricos
-                            'volume': item.get('volume'),
-                            'timestamp': record_timestamp,
-                            'datetime': datetime_str,
-                            'data_type': data_type,
-                            'open': item.get('open'),
-                            'high': item.get('high'),
-                            'low': item.get('low'),
-                            'close': item.get('close'),
-                            'market_cap': None  # No disponible en datos históricos
-                        }
-                        processed_data.append(record)
+                            # Verificar si este registro específico ya existe (verificación rápida)
+                            if self.check_record_exists(symbol, data_type, datetime_str):
+                                logger.debug(f"Skipping duplicate {interval} data point for {symbol} at {datetime_str}")
+                                continue
+                            
+                            # Crear registro con todos los campos necesarios
+                            record = {
+                                'symbol': symbol,
+                                'price': item.get('close', 0),  # Usamos close como precio actual
+                                'change': None,  # No disponible en datos históricos
+                                'change_percent': None,  # No disponible en datos históricos
+                                'volume': item.get('volume', 0),
+                                'timestamp': record_timestamp,
+                                'datetime': datetime_str,
+                                'data_type': data_type,
+                                'open': item.get('open', 0),
+                                'high': item.get('high', 0),
+                                'low': item.get('low', 0),
+                                'close': item.get('close', 0),
+                                'market_cap': None  # No disponible en datos históricos
+                            }
+                            processed_data.append(record)
+                        except Exception as e:
+                            logger.error(f"Error processing data point for {symbol} {interval}: {e}")
+                    
+                    # Organizar datos por fecha ascendente (más antiguos primero)
+                    processed_data.sort(key=lambda x: x['timestamp'])
                     
                     logger.info(f"Successfully processed {len(processed_data)} NEW {interval} data points for {symbol}")
                     return processed_data
@@ -230,9 +350,9 @@ class IngestionManager:
                 logger.error(f"Error fetching {interval} data for {symbol}: {response.status_code} - {response.text}")
         
         except Exception as e:
-            logger.error(f"Exception fetching {interval} data for {symbol}: {e}")
+            logger.error(f"Exception fetching {interval} data for {symbol}: {e}", exc_info=True)
         
-        return None
+        return []
     
     def store_quote(self, quote):
         """Almacenar cotización en tiempo real en la BD y publicar en Kafka"""
@@ -241,42 +361,44 @@ class IngestionManager:
             with self.db_engine.connect() as conn:
                 # Buscamos cotizaciones en un rango de 1 segundo alrededor de la marca de tiempo actual
                 query = text("""
-                    SELECT COUNT(*) FROM market_data
-                    WHERE symbol = :symbol 
-                    AND data_type = 'real_time'
-                    AND timestamp BETWEEN :timestamp - 1 AND :timestamp + 1
+                    SELECT COUNT(*) 
+                    FROM market_data 
+                    WHERE symbol = :symbol AND data_type = :data_type 
+                    AND ABS(EXTRACT(EPOCH FROM to_timestamp(:timestamp) - to_timestamp(market_data.timestamp))) <= 1
                 """)
                 
                 result = conn.execute(query, {
                     "symbol": quote['symbol'],
+                    "data_type": quote['data_type'],
                     "timestamp": quote['timestamp']
                 }).fetchone()
                 
-                if result[0] > 0:
-                    logger.debug(f"Skipping duplicate real-time quote for {quote['symbol']}")
-                    return True
-            
-            # Insertar en PostgreSQL
-            with self.db_engine.begin() as conn:  # begin() crea una transacción y hace commit al salir del bloque
-                query = text("""
-                    INSERT INTO market_data 
-                    (symbol, price, change, change_percent, volume, timestamp, datetime, data_type, open, high, low, close, market_cap)
-                    VALUES 
-                    (:symbol, :price, :change, :change_percent, :volume, :timestamp, :datetime, :data_type, :open, :high, :low, :close, :market_cap)
+                # Si ya existe una cotización similar, no hacemos nada
+                if result and result[0] > 0:
+                    logger.debug(f"Duplicate quote for {quote['symbol']} at {quote['datetime']}")
+                    return False
+                
+                # Insertar la cotización
+                insert_query = text("""
+                    INSERT INTO market_data (
+                        symbol, price, change, change_percent, volume, timestamp, datetime, 
+                        data_type, open, high, low, close, market_cap
+                    ) VALUES (
+                        :symbol, :price, :change, :change_percent, :volume, :timestamp, :datetime, 
+                        :data_type, :open, :high, :low, :close, :market_cap
+                    )
                 """)
                 
-                conn.execute(query, quote)
-                # No necesitamos hacer commit aquí, se hace automáticamente al salir del bloque with
+                conn.execute(insert_query, quote)
             
-            # Publicar en Kafka si está disponible
+            # Publicar en Kafka
             if self.kafka_producer:
                 self.kafka_producer.send(INGESTION_TOPIC, quote)
             
-            logger.info(f"Stored and published quote for {quote['symbol']}")
             return True
         
         except Exception as e:
-            logger.error(f"Error storing quote for {quote['symbol']}: {e}")
+            logger.error(f"Error storing quote: {e}")
             return False
     
     def store_intraday_data(self, data):
@@ -285,49 +407,115 @@ class IngestionManager:
             return False
         
         try:
-            # Insertar en PostgreSQL en lote
-            with self.db_engine.begin() as conn:  # begin() crea una transacción y hace commit al salir del bloque
-                query = text("""
-                    INSERT INTO market_data 
-                    (symbol, price, change, change_percent, volume, timestamp, datetime, data_type, open, high, low, close, market_cap)
-                    VALUES 
-                    (:symbol, :price, :change, :change_percent, :volume, :timestamp, :datetime, :data_type, :open, :high, :low, :close, :market_cap)
-                    ON CONFLICT DO NOTHING
-                """)
-                
-                # Ejecutar en lote
-                errors = 0
+            # Inserción en lote para mejor rendimiento
+            with self.db_engine.connect() as conn:
                 for record in data:
-                    try:
-                        conn.execute(query, record)
-                    except Exception as e:
-                        errors += 1
-                        logger.error(f"Error inserting record: {e}")
-                
-                # No necesitamos hacer commit aquí, se hace automáticamente al salir del bloque with
+                    # Usamos "ON CONFLICT DO NOTHING" para evitar errores de duplicados
+                    insert_query = text("""
+                        INSERT INTO market_data (
+                            symbol, price, change, change_percent, volume, timestamp, datetime, 
+                            data_type, open, high, low, close, market_cap
+                        ) VALUES (
+                            :symbol, :price, :change, :change_percent, :volume, :timestamp, :datetime, 
+                            :data_type, :open, :high, :low, :close, :market_cap
+                        )
+                        ON CONFLICT ON CONSTRAINT market_data_symbol_type_datetime_unique DO NOTHING
+                    """)
+                    
+                    conn.execute(insert_query, record)
             
-            # Publicar en Kafka en lote si está disponible
-            if self.kafka_producer:
-                for record in data:
-                    self.kafka_producer.send(INGESTION_TOPIC, record)
-            
-            logger.info(f"Stored {len(data) - errors} data points in database, {errors} errors")
             return True
         
         except Exception as e:
-            logger.error(f"Error storing batch data: {e}")
+            logger.error(f"Error storing intraday data: {e}")
             return False
 
-# Crear una instancia del gestor de ingesta
-ingestion_manager = IngestionManager(
-    api_key=FMP_API_KEY,
-    base_url=FMP_BASE_URL,
-    db_engine=engine,
-    kafka_producer=producer
-)
+    def store_and_publish_realtime_data(self, data_point):
+        """
+        Almacena un punto de datos en tiempo real en la BD y lo publica en Kafka.
+        Esta función se usa específicamente para los datos de 5min en tiempo "casi real".
+        """
+        if not data_point:
+            return False
+        
+        try:
+            # Primero, guardar en la base de datos con ON CONFLICT DO NOTHING
+            with self.db_engine.connect() as conn:
+                insert_query = text("""
+                    INSERT INTO market_data (
+                        symbol, price, change, change_percent, volume, timestamp, datetime, 
+                        data_type, open, high, low, close, market_cap
+                    ) VALUES (
+                        :symbol, :price, :change, :change_percent, :volume, :timestamp, :datetime, 
+                        :data_type, :open, :high, :low, :close, :market_cap
+                    )
+                    ON CONFLICT ON CONSTRAINT market_data_symbol_type_datetime_unique DO NOTHING
+                """)
+                
+                conn.execute(insert_query, data_point)
+            
+            # Luego, publicar en Kafka (independientemente de si se guardó o no en BD)
+            if self.kafka_producer:
+                self.kafka_producer.send(INGESTION_TOPIC, data_point)
+                logger.info(f"Realtime 5min data point for {data_point['symbol']} at {data_point['datetime']} published to Kafka")
+                # --- NUEVO: Notificar a clientes WS --- 
+                asyncio.run_coroutine_threadsafe(notify_clients(json.dumps(data_point)), loop)
+                # --- FIN NUEVO ---
+                return True
+            else:
+                logger.error("Cannot publish to Kafka: producer not available")
+                return False
+            
+        except Exception as e:
+            logger.error(f"Error storing and publishing realtime data: {e}", exc_info=True)
+            return False
 
-def ingestion_thread():
-    """Background thread to run the ingestion process"""
+# Inicializar el gestor de ingesta
+ingestion_manager = IngestionManager(FMP_API_KEY, FMP_BASE_URL, engine)
+
+def realtime_ingestion_thread():
+    """
+    Hilo que obtiene datos "en tiempo real" (5min) para alimentar el streaming.
+    Se ejecuta cada REALTIME_INTERVAL_SECONDS (por defecto 5 minutos).
+    """
+    symbols = [
+        "AAPL", "GOOGL", "MSFT", "AMZN", "TSLA", 
+        "META", "NVDA", "NFLX", "INTC", "AMD"
+    ]
+    
+    logger.info(f"Starting realtime ingestion thread with interval of {REALTIME_INTERVAL_SECONDS} seconds")
+    
+    while True:
+        start_time = time.time()
+        
+        # Para cada símbolo, obtener y procesar el último punto de datos de 5min
+        for symbol in symbols:
+            try:
+                logger.debug(f"Fetching latest 5min data for {symbol}")
+                data_point = ingestion_manager.fetch_latest_5min_data(symbol)
+                
+                if data_point:
+                    # Almacenar en BD y publicar en Kafka
+                    success = ingestion_manager.store_and_publish_realtime_data(data_point)
+                    logger.info(f"Processed realtime 5min data for {symbol} at {data_point['datetime']} - Success: {success}")
+                else:
+                    logger.debug(f"No new 5min data available for {symbol}")
+                
+                # Pequeña pausa entre símbolos para no saturar la API
+                time.sleep(0.5)
+                
+            except Exception as e:
+                logger.error(f"Error processing realtime data for {symbol}: {e}", exc_info=True)
+        
+        # Calcular tiempo a esperar hasta la próxima ejecución
+        elapsed = time.time() - start_time
+        wait_time = max(0, REALTIME_INTERVAL_SECONDS - elapsed)
+        
+        logger.info(f"Realtime ingestion cycle completed in {elapsed:.2f} seconds. Waiting {wait_time:.2f} seconds until next cycle.")
+        time.sleep(wait_time)
+
+def historical_ingestion_thread():
+    """Background thread to run the historical ingestion process"""
     symbols = [
         "AAPL", "GOOGL", "MSFT", "AMZN", "TSLA", 
         "META", "NVDA", "NFLX", "INTC", "AMD",
@@ -337,12 +525,12 @@ def ingestion_thread():
     
     # Configuración de intervalos respetando límites de FMP Starter Plan
     intraday_config = {
-        '1min': {'max_days': 3, 'target_days': 30, 'interval_seconds': 15*60},
-        '5min': {'max_days': 10, 'target_days': 30, 'interval_seconds': 30*60},
-        '15min': {'max_days': 45, 'target_days': 30, 'interval_seconds': 60*60},
-        '30min': {'max_days': 30, 'target_days': 30, 'interval_seconds': 2*60*60},
-        '45min': {'max_days': 45, 'target_days': 30, 'interval_seconds': 3*60*60},
-        '1hour': {'max_days': 90, 'target_days': 30, 'interval_seconds': 4*60*60}
+        '1min': {'max_days': 3, 'target_days': 90, 'interval_seconds': 15*60},
+        '5min': {'max_days': 10, 'target_days': 90, 'interval_seconds': 30*60},
+        '15min': {'max_days': 45, 'target_days': 90, 'interval_seconds': 60*60},
+        '30min': {'max_days': 30, 'target_days': 90, 'interval_seconds': 2*60*60},
+        '45min': {'max_days': 45, 'target_days': 90, 'interval_seconds': 3*60*60},
+        '1hour': {'max_days': 90, 'target_days': 90, 'interval_seconds': 4*60*60}
     }
     
     while True:
@@ -350,16 +538,11 @@ def ingestion_thread():
         
         for symbol in symbols:
             try:
-                # Fetch real-time quote
-                quote = ingestion_manager.fetch_real_time_quote(symbol)
-                if quote:
-                    ingestion_manager.store_quote(quote)
-                
                 # Procesamiento de intervalos históricos
                 for interval, config in intraday_config.items():
                     max_days = config['max_days']
                     target_days = config['target_days']
-                    data_type = f"intraday_{interval}"
+                        data_type = f"intraday_{interval}"
                     
                     # Obtener la última fecha para este símbolo y tipo de datos
                     last_date = ingestion_manager.get_last_date_for_symbol_and_type(symbol, data_type)
@@ -383,69 +566,55 @@ def ingestion_thread():
                         logger.info(f"Initial fetch for {symbol} {data_type} from {start_date}")
                     
                     data = ingestion_manager.fetch_intraday_data(
-                        symbol=symbol,
-                        interval=interval,
-                        start_date=start_date,
-                        end_date=end_date
-                    )
-                    
-                    if data and len(data) > 0:
-                        ingestion_manager.store_intraday_data(data)
+                                symbol=symbol,
+                                interval=interval,
+                                start_date=start_date,
+                                end_date=end_date
+                            )
+                        
+                        if data and len(data) > 0:
+                            ingestion_manager.store_intraday_data(data)
                         logger.info(f"Stored {len(data)} {interval} data points for {symbol}")
-                    
+                
                 time.sleep(1)  # Pequeña pausa entre símbolos
             except Exception as e:
-                logger.error(f"Error processing symbol {symbol}: {e}")
+                logger.error(f"Error processing historical data for {symbol}: {e}", exc_info=True)
         
-        time.sleep(30)  # Pausa entre ciclos de ingesta
+        # Calcular el tiempo transcurrido y esperar hasta el próximo ciclo
+        elapsed = time.time() - current_time
+        logger.info(f"Historical ingestion cycle completed in {elapsed:.2f} seconds")
+        
+        # Esperar 6 horas para el próximo ciclo completo de ingestión histórica
+        wait_time = 6 * 60 * 60  # 6 horas en segundos
+        logger.info(f"Waiting {wait_time} seconds until next historical ingestion cycle")
+        time.sleep(wait_time)
 
-# Crear servidor HTTP para endpoints de salud
-from fastapi import FastAPI, HTTPException
-import uvicorn
-from threading import Thread
-
-app = FastAPI()
-
-@app.get("/health")
-async def health_check():
-    """Verificar el estado del servicio"""
-    db_healthy = True
-    kafka_healthy = True
-    
-    # Verificar conexión a BD
-    try:
-        with engine.connect() as conn:
-            conn.execute(text("SELECT 1"))
-        logger.info("Database health check: healthy")
-    except Exception as e:
-        logger.error(f"Database health check failed: {e}")
-        db_healthy = False
-    
-    # Verificar conexión a Kafka
-    try:
-        if producer:
-            producer.send('test_health_topic', {'test': 'data'})
-            logger.info("Kafka health check: healthy")
-        else:
-            logger.warning("Kafka producer not available")
-            kafka_healthy = False
-    except Exception as e:
-        logger.error(f"Kafka health check failed: {e}")
-        kafka_healthy = False
-    
-    if db_healthy and kafka_healthy:
-        logger.info("Health check passed")
-        return {"status": "healthy"}
-    else:
-        logger.error("Health check failed")
-        raise HTTPException(status_code=500, detail="Service unhealthy")
-
-# Iniciar el thread de ingestion y el servidor HTTP
 if __name__ == "__main__":
-    # Iniciar thread de ingesta
-    thread = Thread(target=ingestion_thread, daemon=True)
-    thread.start()
-    logger.info("Ingestion thread started")
+    logger.info("Iniciando servicio de ingestión...")
     
-    # Iniciar servidor HTTP
-    uvicorn.run(app, host="0.0.0.0", port=8080)
+    # --- NUEVO: Iniciar servidor WebSocket en un hilo --- 
+    loop = asyncio.get_event_loop()
+    websocket_thread = threading.Thread(target=lambda: loop.run_until_complete(start_websocket_server()), daemon=True)
+    websocket_thread.start()
+    # --- FIN NUEVO ---
+
+    # Iniciar hilos de ingesta
+    historical_thread = Thread(target=historical_ingestion_thread, daemon=True)
+    realtime_thread = Thread(target=realtime_ingestion_thread, daemon=True)
+    
+    logger.info("Starting ingestion threads")
+    
+    # Iniciar el hilo de ingesta histórica
+    historical_thread.start()
+    logger.info("Historical ingestion thread started")
+    
+    # Iniciar el hilo de ingesta en tiempo real
+    realtime_thread.start()
+    logger.info("Realtime ingestion thread started")
+    
+    # Mantener el proceso principal vivo
+    try:
+        while True:
+            time.sleep(60)
+    except KeyboardInterrupt:
+        logger.info("Stopping ingestion service...")

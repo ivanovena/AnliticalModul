@@ -244,10 +244,10 @@ const PredictionAnalysis = () => {
         </div>
         
         <div className="mt-2 text-sm text-gray-500 text-center">
-          <span className="inline-block w-3 h-3 bg-red-500 rounded-full mr-1"></span> Error alto (>5%)
+          <span className="inline-block w-3 h-3 bg-red-500 rounded-full mr-1"></span> Error alto (&gt;5%)
           <span className="inline-block ml-3 w-3 h-3 bg-yellow-500 rounded-full mr-1"></span> Error medio (3-5%)
           <span className="inline-block ml-3 w-3 h-3 bg-blue-500 rounded-full mr-1"></span> Error bajo (1-3%)
-          <span className="inline-block ml-3 w-3 h-3 bg-green-500 rounded-full mr-1"></span> Error mínimo (<1%)
+          <span className="inline-block ml-3 w-3 h-3 bg-green-500 rounded-full mr-1"></span> Error mínimo (&lt;1%)
         </div>
       </div>
       

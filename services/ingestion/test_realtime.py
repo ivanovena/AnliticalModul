@@ -1,0 +1,1 @@
+import os, time, threading; from app import realtime_ingestion_thread, logger; logger.info("Iniciando test..."); threading.Thread(target=realtime_ingestion_thread).start(); logger.info("Test iniciado!")

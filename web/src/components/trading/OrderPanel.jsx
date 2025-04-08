@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { usePortfolio } from '../../contexts/PortfolioContext';
 
 const OrderPanel = ({ symbol, currentPrice, position, cash }) => {
@@ -87,10 +87,14 @@ const OrderPanel = ({ symbol, currentPrice, position, cash }) => {
     }
   };
   
-  // Utilizar un porcentaje de la cantidad máxima disponible
-  const usePercentage = (percentage) => {
-    const max = action === 'buy' ? maxBuyQty : maxSellQty;
-    setQuantity(Math.max(1, Math.floor(max * percentage / 100)));
+  // Función para usar un porcentaje del máximo disponible
+  const handlePercentageClick = (percent) => {
+    if (action === 'buy') {
+      const maxQuantity = Math.floor(cash / (orderType === 'market' ? currentPrice : limitPrice || currentPrice));
+      setQuantity(Math.floor(maxQuantity * (percent / 100)));
+    } else if (action === 'sell' && position) {
+      setQuantity(Math.floor(position.quantity * (percent / 100)));
+    }
   };
   
   return (
@@ -168,7 +172,7 @@ const OrderPanel = ({ symbol, currentPrice, position, cash }) => {
             <button
               key={percent}
               className="text-xs py-1 px-2 bg-gray-100 hover:bg-gray-200 rounded"
-              onClick={() => usePercentage(percent)}
+              onClick={() => handlePercentageClick(percent)}
             >
               {percent}%
             </button>

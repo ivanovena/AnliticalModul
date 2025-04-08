@@ -15,6 +15,8 @@ import {
   Pie, 
   Cell
 } from 'recharts';
+import { CircularProgress, Alert } from '@mui/material';
+import PortfolioSummary from '../components/dashboard/PortfolioSummary';
 
 // Componente para mostrar un valor de mercado con cambio
 const MarketValue = ({ symbol, price, change, onClick }) => {
@@ -34,16 +36,23 @@ const MarketValue = ({ symbol, price, change, onClick }) => {
 };
 
 const Dashboard = () => {
-  const { portfolio, metrics } = usePortfolio();
-  const { marketData, watchlist } = useMarketData();
-  const { predictions, activeSymbols } = usePrediction();
-  const { modelStatus } = useModelStatus();
+  const { portfolio, metrics, loading: portfolioLoading, error: portfolioError } = usePortfolio();
+  const { marketData, watchlist, loading: marketLoading, error: marketError } = useMarketData();
+  const { predictions, activeSymbols, loading: predictionLoading, error: predictionError } = usePrediction();
+  const { modelStatus, loading: modelLoading, error: modelError } = useModelStatus();
   
   const [selectedSymbol, setSelectedSymbol] = useState('AAPL');
   const [topPredictions, setTopPredictions] = useState([]);
   
+  // Verificar si hay datos disponibles
+  const hasPortfolioData = portfolio && Object.keys(portfolio).length > 0;
+  const hasMarketData = Object.keys(marketData).length > 0;
+  const hasPredictionData = Object.keys(predictions).length > 0;
+  
   // Actualizar lista de mejores predicciones
   useEffect(() => {
+    if (!activeSymbols || !predictions || activeSymbols.length === 0) return;
+    
     // Obtener predicciones para todos los símbolos activos
     const allPredictions = [];
     
@@ -86,28 +95,35 @@ const Dashboard = () => {
   };
   
   // Preparar datos para el gráfico de cartera
-  const portfolioData = Object.entries(portfolio.positions).map(([symbol, position]) => ({
-    name: symbol,
-    value: position.currentPrice * position.quantity
-  }));
+  const portfolioData = 
+    portfolio?.positions
+    ? Object.entries(portfolio.positions).map(([symbol, position]) => ({
+        name: symbol,
+        value: (position?.currentPrice ?? 0) * (position?.quantity ?? 0)
+      }))
+    : [];
   
-  // Agregar efectivo al gráfico de cartera
-  portfolioData.push({
-    name: 'Efectivo',
-    value: portfolio.cash
-  });
+  // Agregar efectivo al gráfico de cartera si hay datos disponibles
+  if (portfolio?.cash) {
+    portfolioData.push({
+      name: 'Efectivo',
+      value: portfolio.cash
+    });
+  }
   
   // Colores para el gráfico de cartera
   const PORTFOLIO_COLORS = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899'];
   
   // Generar datos históricos simulados para el gráfico de valor de cartera
   const generatePortfolioHistory = () => {
+    if (!portfolio?.totalValue) return [];
+    
     const data = [];
     const now = new Date();
     const days = 30; // Último mes
     
     // Valor actual
-    const currentValue = portfolio.totalValue;
+    const currentValue = portfolio.totalValue || 100000;
     
     // Generar datos
     for (let i = days; i >= 0; i--) {
@@ -129,52 +145,95 @@ const Dashboard = () => {
   // Datos para el gráfico de valor de cartera
   const portfolioHistoryData = generatePortfolioHistory();
   
+  // Estado general de carga
+  const isLoading = portfolioLoading || marketLoading || predictionLoading || modelLoading;
+  
+  // Combinar errores para mostrar alertas
+  const errors = [];
+  if (portfolioError) errors.push(`Error de cartera: ${portfolioError}`);
+  if (marketError) errors.push(`Error de mercado: ${marketError}`);
+  if (predictionError) errors.push(`Error de predicciones: ${predictionError}`);
+  if (modelError) errors.push(`Error de modelos: ${modelError}`);
+  
+  // Modificación: Comprobación temprana si portfolio es null después de cargar
+  if (!portfolioLoading && !portfolio && !portfolioError) {
+    return (
+      <Alert severity="error">
+        No se pudo cargar la información de la cartera. Inténtalo de nuevo más tarde.
+      </Alert>
+    );
+  }
+  
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 relative">
+      {isLoading && (
+        <div className="fixed top-1/2 right-4 z-50">
+          <CircularProgress size={30} />
+        </div>
+      )}
+      
+      {errors.length > 0 && (
+        <Alert severity="warning" className="mb-4">
+          Algunos servicios no están disponibles. Se muestra información guardada previamente.
+        </Alert>
+      )}
+      
       {/* Resumen de cartera */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
         <div className="bg-white p-6 rounded-lg shadow">
           <div className="text-sm text-gray-500">Valor Total</div>
-          <div className="text-2xl font-bold mt-1">${portfolio.totalValue.toLocaleString('es-ES', { minimumFractionDigits: 2 })}</div>
-          <div className={`text-sm ${metrics.totalReturn >= 0 ? 'text-green-600' : 'text-red-600'}`}>
-            {metrics.totalReturn >= 0 ? '+' : ''}{metrics.totalReturn.toFixed(2)}% total
+          <div className="text-2xl font-bold mt-1">
+            ${(portfolio?.totalValue ?? 0).toLocaleString('es-ES', { minimumFractionDigits: 2 })}
+          </div>
+          <div className={`text-sm ${metrics?.totalReturn >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+            {metrics?.totalReturn >= 0 ? '+' : ''}{(metrics?.totalReturn ?? 0).toFixed(2)}% total
           </div>
         </div>
         
         <div className="bg-white p-6 rounded-lg shadow">
           <div className="text-sm text-gray-500">Efectivo Disponible</div>
-          <div className="text-2xl font-bold mt-1">${portfolio.cash.toLocaleString('es-ES', { minimumFractionDigits: 2 })}</div>
+          <div className="text-2xl font-bold mt-1">
+            ${(portfolio?.cash ?? 0).toLocaleString('es-ES', { minimumFractionDigits: 2 })}
+          </div>
           <div className="text-sm text-gray-500">
-            {((portfolio.cash / portfolio.totalValue) * 100).toFixed(1)}% del total
+            {(portfolio?.totalValue ?? 0) > 0 
+              ? (((portfolio?.cash ?? 0) / portfolio.totalValue) * 100).toFixed(1) 
+              : "0.0"}% del total
           </div>
         </div>
         
         <div className="bg-white p-6 rounded-lg shadow">
           <div className="text-sm text-gray-500">Rendimiento Diario</div>
           <div className="text-2xl font-bold mt-1">
-            <span className={metrics.dailyReturn >= 0 ? 'text-green-600' : 'text-red-600'}>
-              {metrics.dailyReturn >= 0 ? '+' : ''}{metrics.dailyReturn.toFixed(2)}%
+            <span className={metrics?.dailyReturn >= 0 ? 'text-green-600' : 'text-red-600'}>
+              {metrics?.dailyReturn >= 0 ? '+' : ''}{(metrics?.dailyReturn ?? 0).toFixed(2)}%
             </span>
           </div>
           <div className="text-sm text-gray-500">
-            ${((portfolio.totalValue * metrics.dailyReturn) / 100).toLocaleString('es-ES', { minimumFractionDigits: 2 })}
+            ${((portfolio?.totalValue ?? 0) * (metrics?.dailyReturn ?? 0) / 100).toLocaleString('es-ES', { minimumFractionDigits: 2 })}
           </div>
         </div>
         
         <div className="bg-white p-6 rounded-lg shadow">
           <div className="text-sm text-gray-500">Estado de Modelos</div>
           <div className="flex items-center mt-1">
-            <div className={`w-3 h-3 rounded-full mr-2`} style={{ backgroundColor: getStatusColor(modelStatus.ensemble.status) }}></div>
+            <div className={`w-3 h-3 rounded-full mr-2`} 
+                style={{ backgroundColor: getStatusColor(modelStatus?.ensemble?.status || 'unknown') }}></div>
             <div className="text-lg font-semibold">
-              {modelStatus.ensemble.status === 'healthy' ? 'Normal' : 
-               modelStatus.ensemble.status === 'degraded' ? 'Degradado' : 
-               modelStatus.ensemble.status === 'critical' ? 'Crítico' : 'Desconocido'}
+              {modelStatus?.ensemble?.status === 'healthy' ? 'Normal' : 
+               modelStatus?.ensemble?.status === 'degraded' ? 'Degradado' : 
+               modelStatus?.ensemble?.status === 'critical' ? 'Crítico' : 'Desconocido'}
             </div>
           </div>
           <div className="text-sm text-gray-500">
-            Precisión: {modelStatus.ensemble.accuracy?.toFixed(1)}%
+            Precisión: {modelStatus?.ensemble?.accuracy?.toFixed(1) || "N/A"}%
           </div>
         </div>
+      </div>
+      
+      {/* Componente PortfolioSummary mejorado */}
+      <div className="bg-white rounded-lg shadow">
+        <PortfolioSummary />
       </div>
       
       {/* Gráfico de valor de cartera y distribución */}
@@ -182,49 +241,61 @@ const Dashboard = () => {
         <div className="lg:col-span-2 bg-white rounded-lg shadow p-4">
           <h2 className="text-lg font-semibold mb-4">Evolución del Valor de Cartera</h2>
           <div className="h-80">
-            <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={portfolioHistoryData}>
-                <CartesianGrid strokeDasharray="3 3" />
-                <XAxis dataKey="date" />
-                <YAxis domain={['auto', 'auto']} />
-                <Tooltip formatter={(value) => ['$' + value.toLocaleString('es-ES', { minimumFractionDigits: 2 }), 'Valor']} />
-                <Line 
-                  type="monotone" 
-                  dataKey="value" 
-                  name="Valor de Cartera" 
-                  stroke="#3b82f6" 
-                  strokeWidth={2}
-                  dot={false}
-                  activeDot={{ r: 6 }}
-                />
-              </LineChart>
-            </ResponsiveContainer>
+            {portfolioHistoryData.length > 0 ? (
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart data={portfolioHistoryData}>
+                  <CartesianGrid strokeDasharray="3 3" />
+                  <XAxis dataKey="date" />
+                  <YAxis domain={['auto', 'auto']} />
+                  <Tooltip formatter={(value) => ['$' + value.toLocaleString('es-ES', { minimumFractionDigits: 2 }), 'Valor']} />
+                  <Line 
+                    type="monotone" 
+                    dataKey="value" 
+                    name="Valor de Cartera" 
+                    stroke="#3b82f6" 
+                    strokeWidth={2}
+                    dot={false}
+                    activeDot={{ r: 6 }}
+                  />
+                </LineChart>
+              </ResponsiveContainer>
+            ) : (
+              <div className="flex h-full items-center justify-center text-gray-500">
+                No hay datos históricos disponibles
+              </div>
+            )}
           </div>
         </div>
         
         <div className="bg-white rounded-lg shadow p-4">
           <h2 className="text-lg font-semibold mb-4">Distribución de Cartera</h2>
           <div className="h-80">
-            <ResponsiveContainer width="100%" height="100%">
-              <PieChart>
-                <Pie
-                  data={portfolioData}
-                  cx="50%"
-                  cy="50%"
-                  labelLine={false}
-                  label={({ name, percent }) => `${name}: ${(percent * 100).toFixed(1)}%`}
-                  outerRadius={80}
-                  fill="#8884d8"
-                  dataKey="value"
-                >
-                  {portfolioData.map((entry, index) => (
-                    <Cell key={`cell-${index}`} fill={PORTFOLIO_COLORS[index % PORTFOLIO_COLORS.length]} />
-                  ))}
-                </Pie>
-                <Tooltip formatter={(value) => ['$' + value.toLocaleString('es-ES', { minimumFractionDigits: 2 }), 'Valor']} />
-                <Legend />
-              </PieChart>
-            </ResponsiveContainer>
+            {portfolioData.length > 0 ? (
+              <ResponsiveContainer width="100%" height="100%">
+                <PieChart>
+                  <Pie
+                    data={portfolioData}
+                    cx="50%"
+                    cy="50%"
+                    labelLine={false}
+                    label={({ name, percent }) => `${name}: ${(percent * 100).toFixed(1)}%`}
+                    outerRadius={80}
+                    fill="#8884d8"
+                    dataKey="value"
+                  >
+                    {portfolioData.map((entry, index) => (
+                      <Cell key={`cell-${index}`} fill={PORTFOLIO_COLORS[index % PORTFOLIO_COLORS.length]} />
+                    ))}
+                  </Pie>
+                  <Tooltip formatter={(value) => ['$' + value.toLocaleString('es-ES', { minimumFractionDigits: 2 }), 'Valor']} />
+                  <Legend />
+                </PieChart>
+              </ResponsiveContainer>
+            ) : (
+              <div className="flex h-full items-center justify-center text-gray-500">
+                No hay posiciones en la cartera
+              </div>
+            )}
           </div>
         </div>
       </div>
@@ -241,55 +312,61 @@ const Dashboard = () => {
           </div>
           
           <div className="overflow-x-auto">
-            <table className="min-w-full divide-y divide-gray-200">
-              <thead className="bg-gray-50">
-                <tr>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                    Símbolo
-                  </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                    Precio Actual
-                  </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                    Precio a 1d
-                  </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                    Cambio Esperado
-                  </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                    Acción
-                  </th>
-                </tr>
-              </thead>
-              <tbody className="bg-white divide-y divide-gray-200">
-                {topPredictions.map((prediction, index) => (
-                  <tr key={prediction.symbol}>
-                    <td className="px-6 py-4 whitespace-nowrap font-medium">
-                      {prediction.symbol}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      ${prediction.currentPrice.toFixed(2)}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      ${prediction.predictedPrice.toFixed(2)}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <span className={prediction.changePct >= 0 ? 'text-green-600' : 'text-red-600'}>
-                        {prediction.changePct >= 0 ? '+' : ''}{prediction.changePct.toFixed(2)}%
-                      </span>
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <Link 
-                        to={`/trading?symbol=${prediction.symbol}`}
-                        className="text-indigo-600 hover:text-indigo-900"
-                      >
-                        Operar
-                      </Link>
-                    </td>
+            {topPredictions.length > 0 ? (
+              <table className="min-w-full divide-y divide-gray-200">
+                <thead className="bg-gray-50">
+                  <tr>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                      Símbolo
+                    </th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                      Precio Actual
+                    </th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                      Precio a 1d
+                    </th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                      Cambio Esperado
+                    </th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                      Acción
+                    </th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody className="bg-white divide-y divide-gray-200">
+                  {topPredictions.map((prediction, index) => (
+                    <tr key={prediction.symbol}>
+                      <td className="px-6 py-4 whitespace-nowrap font-medium">
+                        {prediction.symbol}
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap">
+                        ${prediction.currentPrice.toFixed(2)}
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap">
+                        ${prediction.predictedPrice.toFixed(2)}
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap">
+                        <span className={prediction.changePct >= 0 ? 'text-green-600' : 'text-red-600'}>
+                          {prediction.changePct >= 0 ? '+' : ''}{prediction.changePct.toFixed(2)}%
+                        </span>
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap">
+                        <Link 
+                          to={`/trading?symbol=${prediction.symbol}`}
+                          className="text-indigo-600 hover:text-indigo-900"
+                        >
+                          Operar
+                        </Link>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            ) : (
+              <div className="py-8 text-center text-gray-500">
+                {predictionLoading ? 'Cargando predicciones...' : 'No hay predicciones disponibles'}
+              </div>
+            )}
           </div>
         </div>
         
@@ -303,19 +380,38 @@ const Dashboard = () => {
           </div>
           
           <div className="grid grid-cols-1 gap-3">
-            {watchlist.slice(0, 5).map(symbol => {
-              const data = marketData[symbol]?.quote;
-              
-              return (
-                <MarketValue 
-                  key={symbol}
-                  symbol={symbol}
-                  price={data?.price || 0}
-                  change={data?.percentChange || 0}
-                  onClick={() => setSelectedSymbol(symbol)}
-                />
-              );
-            })}
+            {hasMarketData && watchlist && watchlist.length > 0 ? (
+              watchlist.slice(0, 5).map(symbol => {
+                const dataEntry = marketData[symbol];
+                const quoteData = dataEntry?.quote;
+                const symbolError = dataEntry?.error;
+
+                // Si hay un error específico para este símbolo, mostrarlo
+                if (symbolError) {
+                  return (
+                    <div key={symbol} className="p-4 border rounded-lg bg-red-50 text-red-700">
+                      <div className="font-medium">{symbol}</div>
+                      <div className="text-xs mt-1">Error: {symbolError}</div>
+                    </div>
+                  );
+                }
+                
+                // Si no hay error, mostrar MarketValue (asegurando valores por defecto)
+                return (
+                  <MarketValue 
+                    key={symbol}
+                    symbol={symbol}
+                    price={quoteData?.price ?? 0}
+                    change={quoteData?.percentChange ?? 0}
+                    onClick={() => setSelectedSymbol(symbol)}
+                  />
+                );
+              })
+            ) : (
+              <div className="py-8 text-center text-gray-500">
+                {marketLoading ? 'Cargando datos de mercado...' : 'No hay datos de mercado disponibles'}
+              </div>
+            )}
           </div>
         </div>
       </div>

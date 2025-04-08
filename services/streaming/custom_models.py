@@ -62,10 +62,13 @@ class ALMARegressor(base.Regressor):
         
     def predict_one(self, x):
         """Predict the target value for a single observation."""
-        # If we don't have enough data, use simple average
+        # If the buffer is completely empty, return 0
+        if not self.buffer:
+             return 0.0
+
+        # If we don't have enough data for ALMA, use simple average
         if len(self.buffer) < self.window_size:
-            if not self.buffer:
-                return 0
             return sum(self.buffer) / len(self.buffer)
-            
+
+        # Otherwise, use the calculated ALMA prediction
         return self._last_prediction

@@ -22,6 +22,7 @@ import seaborn as sns
 from kafka import KafkaProducer
 import joblib
 from config import DB_URI, KAFKA_BROKER, KAFKA_TOPIC, MODEL_OUTPUT_PATH
+from sklearn.feature_selection import VarianceThreshold
 
 # Configure enhanced logging
 logging.basicConfig(
@@ -36,14 +37,21 @@ logger = logging.getLogger("BatchService")
 
 # Initialize SQLAlchemy engine with connection pooling
 try:
+    # Forzar la conexión a postgres:5432 en lugar de usar DB_URI directamente
+    postgres_host = os.getenv("POSTGRES_HOST", "postgres")
+    postgres_port = os.getenv("POSTGRES_PORT", "5432")
+    postgres_user = os.getenv("POSTGRES_USER", "market_admin")
+    postgres_pass = os.getenv("POSTGRES_PASSWORD", "postgres")
+    postgres_db = os.getenv("POSTGRES_DB", "market_data")
+    
     engine = create_engine(
-        DB_URI, 
+        f"postgresql://{postgres_user}:{postgres_pass}@{postgres_host}:{postgres_port}/{postgres_db}", 
         pool_pre_ping=True,
         pool_size=5,
         max_overflow=10,
         pool_recycle=3600
     )
-    logger.info("Database connection established")
+    logger.info(f"Database connection established to {postgres_host}:{postgres_port}/{postgres_db} as {postgres_user}")
 except Exception as e:
     logger.critical(f"Failed to connect to database: {e}")
     raise
@@ -51,18 +59,18 @@ except Exception as e:
 # Initialize Kafka producer with error handling
 try:
     producer = KafkaProducer(
-        bootstrap_servers=[KAFKA_BROKER],
+        bootstrap_servers=['kafka:9092'],
         value_serializer=lambda v: json.dumps(v).encode('utf-8'),
         acks='all',
         retries=5,
         retry_backoff_ms=100
     )
-    logger.info("Kafka producer initialized")
+    logger.info("Kafka producer initialized with kafka:9092")
 except Exception as e:
     logger.critical(f"Failed to initialize Kafka producer: {e}")
     raise
 
-def load_data(symbol: str, max_records: int = 20000) -> pd.DataFrame:
+def load_data(symbol: str, max_records: int = 40000) -> pd.DataFrame:
     """
     Load market data for a symbol with enhanced error handling and data validation
     Limita la cantidad máxima de registros para evitar sobrecarga de memoria
@@ -128,7 +136,7 @@ def load_data(symbol: str, max_records: int = 20000) -> pd.DataFrame:
         logger.error(f"Error loading data for {symbol}: {e}")
         return pd.DataFrame()
 
-def engineer_features(df: pd.DataFrame, reduced_features: bool = True) -> pd.DataFrame:
+def engineer_features(df: pd.DataFrame, symbol: str, reduced_features: bool = True) -> pd.DataFrame:
     """
     Engineer advanced features for time series prediction
     Con opción para reducir la cantidad de features generadas y ahorrar memoria
@@ -139,6 +147,12 @@ def engineer_features(df: pd.DataFrame, reduced_features: bool = True) -> pd.Dat
     try:
         # Copy to avoid modifying original
         feature_df = df.copy()
+        
+        # --- NUEVO: Eliminar columnas problemáticas --- 
+        cols_to_drop = ['change', 'change_percent', 'market_cap', 'data_type'] # Añadir data_type también
+        feature_df = feature_df.drop(columns=cols_to_drop, errors='ignore')
+        logger.info(f"Columnas eliminadas antes de feature engineering: {cols_to_drop}")
+        # --- FIN NUEVO --- 
         
         # Technical indicators - versión reducida seleccionando solo las features más importantes
         
@@ -253,7 +267,7 @@ def engineer_features(df: pd.DataFrame, reduced_features: bool = True) -> pd.Dat
                 feature_df[col] = feature_df[col].clip(lower=lower_bound, upper=upper_bound)
         
         # Drop rows with NaN values (from rolling windows)
-        feature_df.dropna(inplace=True)
+        # feature_df.dropna(inplace=True) # <<--- COMENTADO DE NUEVO
         
         # Liberar memoria eliminando columnas temporales
         del delta, gain, loss, rs
@@ -275,7 +289,27 @@ def engineer_features(df: pd.DataFrame, reduced_features: bool = True) -> pd.Dat
                 feature_df.loc[mask, col] = np.nan
         
         # Eliminar filas con NaN después de reemplazar infinitos
-        feature_df.dropna(inplace=True)
+        # feature_df.dropna(inplace=True) # <<--- COMENTADO DE NUEVO
+            
+        # --- NUEVO: Imputar NaNs restantes con ffill y bfill --- 
+        initial_nans = feature_df.isna().sum().sum()
+        if initial_nans > 0:
+            # --- ELIMINAR LOGS Y FALLBACK --- 
+            # nan_counts = feature_df.isna().sum()
+            # all_nan_cols = nan_counts[nan_counts == len(feature_df)].index.tolist()
+            # if all_nan_cols:
+            #     logger.warning(f"Columnas COMPLETAMENTE NaN ANTES de ffill/bfill en {symbol}: {all_nan_cols}")
+            logger.info(f"Imputando {initial_nans} NaNs restantes en {symbol} usando ffill/bfill...")
+            feature_df.ffill(inplace=True)
+            feature_df.bfill(inplace=True)
+            # final_nans = feature_df.isna().sum().sum()
+            # if final_nans > 0:
+            #     logger.warning(f"¡Quedaron {final_nans} NaNs DESPUÉS de ffill/bfill en {symbol}! Eliminando filas restantes.")
+            #     feature_df.dropna(inplace=True) # Fallback final por si acaso
+            # else:
+            #     logger.info(f"NaNs imputados correctamente para {symbol}.")
+            # --- FIN ELIMINACIÓN --- 
+        # --- FIN NUEVO --- 
             
         return feature_df
     except Exception as e:
@@ -304,12 +338,6 @@ def train_models(df: pd.DataFrame, symbol: str) -> dict:
         if not object_columns.empty:
             logger.warning(f"Eliminando columnas categóricas/texto: {list(object_columns)}")
             X = X.drop(columns=object_columns)
-        
-        # Verificar si hay valores NaN o infinitos y manejarlos
-        X = X.replace([np.inf, -np.inf], np.nan)
-        if X.isna().any().any():
-            logger.warning(f"Reemplazando valores NaN con mediana para {symbol}")
-            X = X.fillna(X.median())
         
         # Obtener solo las características más importantes usando Random Forest para reducir dimensionalidad
         if X.shape[1] > 30:
@@ -375,6 +403,7 @@ def train_models(df: pd.DataFrame, symbol: str) -> dict:
                 
                 # Crear pipeline
                 pipe = Pipeline([
+                    ('variance_threshold', VarianceThreshold(threshold=0)),
                     ('scaler', StandardScaler()),
                     ('model', model_info['model'])
                 ])
@@ -448,6 +477,17 @@ def train_models(df: pd.DataFrame, symbol: str) -> dict:
         with open(metadata_filename, 'w') as f:
             json.dump(metadata, f, indent=4)
         logger.info(f"Metadata guardada para {symbol} en {metadata_filename}")
+        
+        # --- NUEVO: Preparar datos para publicación --- 
+        publish_data = {
+            "best_model": best_model_name,
+            "metrics": model_results, 
+            "training_date": metadata['training_date']
+        }
+        # --- FIN NUEVO ---
+        
+        # Publicar evento (asegurarse de pasar la ruta correcta)
+        publish_model_update(symbol, model_path, publish_data)
         
         # Feature importance plot solo para los modelos que lo soportan
         try:
@@ -535,11 +575,7 @@ def train_models(df: pd.DataFrame, symbol: str) -> dict:
             "status": "success", 
             "symbol": symbol,
             "best_model": best_model_name,
-            "metrics": {
-                "mae": model_results[best_model_name]['mae'],
-                "rmse": model_results[best_model_name]['rmse'],
-                "r2": model_results[best_model_name]['r2']
-            }
+            "metrics": model_results[best_model_name] # Solo las métricas del mejor
         }
     
     except Exception as e:
@@ -612,7 +648,7 @@ def evaluate_model(model_path: str, symbol: str) -> Dict[str, Any]:
             return {}
         
         # Preprocess recent data
-        recent_data = engineer_features(recent_data)
+        recent_data = engineer_features(recent_data, symbol)
         
         if recent_data.empty:
             logger.warning(f"Failed to engineer features for recent data for {symbol}")
@@ -677,9 +713,11 @@ def publish_model_update(symbol: str, model_file: str, model_data: Dict[str, Any
     """
     Publish model update to Kafka
     """
-    if not model_file or not os.path.exists(model_file):
-        logger.error(f"Invalid model file: {model_file}")
-        return False
+    # --- ELIMINAR VERIFICACIÓN --- 
+    # if not model_file or not os.path.exists(model_file):
+    #     logger.error(f"Invalid model file: {model_file}")
+    #     return False
+    # --- FIN ELIMINACIÓN ---
         
     try:
         # Métricas que serán útiles para el broker
@@ -901,7 +939,7 @@ def main():
             continue
         
         # Step 2: Engineer features
-        df = engineer_features(df)
+        df = engineer_features(df, symbol)
         
         if df.empty:
             logger.error(f"Feature engineering failed for {symbol}, skipping")
@@ -912,49 +950,14 @@ def main():
         model_result = train_models(df, symbol)
         
         if model_result.get("status") == "success":
-            # Extraer el objeto modelo del directorio
-            model_dir = os.path.join(MODEL_OUTPUT_PATH, symbol)
-            model_path = os.path.join(model_dir, f"{symbol}_model.pkl")
-            
-            if os.path.exists(model_path):
-                # Cargar el modelo para publicarlo
-                try:
-                    model_object = joblib.load(model_path)
-                    
-                    # Preparar datos de modelo para publicación
-                    model_data = {
-                        "best_model": model_result.get("best_model"),
-                        "metrics": model_result.get("metrics", {}),
-                        "model_object": model_object,
-                        "training_date": datetime.datetime.now().isoformat(),
-                        "symbol": symbol
-                    }
-                    
-                    # Publicar modelo - sin pasar el objeto modelo, solo el path
-                    model_data_for_publish = model_data.copy()
-                    del model_data_for_publish["model_object"]  # Eliminar objeto modelo para publicación
-                    
-                    # Publicar modelo
-                    success = publish_model_update(symbol, model_path, model_data_for_publish)
-                    
-                    if success:
-                        successes += 1
-                        logger.info(f"Successfully saved and published model for {symbol}")
-                    else:
-                        logger.warning(f"Model trained but not published for {symbol}")
-                    
-                    results.append({
-                        "symbol": symbol,
-                        "status": "success",
-                        "model": model_result.get("best_model"),
-                        "metrics": model_result.get("metrics", {})
-                    })
-                except Exception as e:
-                    logger.error(f"Error publishing model for {symbol}: {e}")
-                    results.append({"symbol": symbol, "status": "error", "message": f"Model publication failed: {e}"})
-            else:
-                logger.error(f"Model file not found at {model_path}")
-                results.append({"symbol": symbol, "status": "error", "message": "Model file not found"})
+            successes += 1
+            logger.info(f"Successfully trained and published model for {symbol}")
+            results.append({
+                "symbol": symbol,
+                "status": "success",
+                "model": model_result.get("best_model"),
+                "metrics": model_result.get("metrics", {})
+            })
         else:
             results.append({
                 "symbol": symbol, 

@@ -33,9 +33,9 @@ COPY nginx/nginx.conf /etc/nginx/conf.d/default.conf
 # Create a healthcheck file
 RUN echo "OK" > /usr/share/nginx/html/healthcheck.html
 
-# Healthcheck to make sure nginx is running
+# Healthcheck to make sure nginx is running and responsive
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD wget -q -O /dev/null http://localhost/healthcheck.html || exit 1
+  CMD wget --spider -q http://localhost/healthcheck.html || exit 1
 
 # Expose port
 EXPOSE 80

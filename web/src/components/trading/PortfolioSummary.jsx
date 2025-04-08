@@ -1,99 +1,103 @@
 import React from 'react';
 
 const PortfolioSummary = ({ portfolio, metrics }) => {
-  // Calcular valores
-  const totalPositionsValue = Object.values(portfolio.positions).reduce(
-    (sum, position) => sum + position.quantity * position.currentPrice, 
-    0
+  // Calcular datos de forma segura
+  const positions = portfolio?.positions ?? {};
+  const totalValue = portfolio?.totalValue ?? 0;
+  const initialCash = portfolio?.initialCash ?? 0;
+  const cash = portfolio?.cash ?? 0;
+  
+  const investedValue = Object.values(positions).reduce(
+    (total, pos) => total + ((pos?.quantity ?? 0) * (pos?.avgCost ?? 0)), 0
   );
   
-  const cashPercentage = (portfolio.cash / portfolio.totalValue) * 100;
-  const positionsPercentage = (totalPositionsValue / portfolio.totalValue) * 100;
+  const currentPositionsValue = Object.values(positions).reduce(
+    (total, pos) => total + ((pos?.quantity ?? 0) * (pos?.currentPrice ?? 0)), 0
+  );
+  
+  // Calcular ganancias/pérdidas realizadas e irrealizadas
+  const unrealizedPL = currentPositionsValue - investedValue;
+  const unrealizedPLPercent = investedValue > 0 ? (unrealizedPL / investedValue) * 100 : 0;
+  
+  // Calcular ganancias/pérdidas totales (incluye las realizadas)
+  const totalPL = totalValue - initialCash;
+  const totalPLPercent = initialCash > 0 ? (totalPL / initialCash) * 100 : 0;
+  
+  // Métricas seguras
+  const dailyReturn = metrics?.dailyReturn ?? 0;
+  const weeklyReturn = metrics?.weeklyReturn ?? 0;
   
   return (
-    <div className="h-full">
-      <h2 className="text-lg font-semibold mb-2">Mi Cartera</h2>
+    <div className="rounded-lg border p-4 h-full flex flex-col">
+      <h3 className="font-semibold mb-4">Resumen de Cartera</h3>
       
-      <div className="grid grid-cols-2 gap-2 mb-3">
-        <div className="col-span-2">
-          <div className="text-sm text-gray-500">Valor Total</div>
-          <div className="text-xl font-bold">${portfolio.totalValue.toLocaleString('es-ES', { minimumFractionDigits: 2 })}</div>
-        </div>
-        
-        <div>
-          <div className="text-sm text-gray-500">Efectivo</div>
-          <div className="text-lg font-semibold">${portfolio.cash.toLocaleString('es-ES', { minimumFractionDigits: 2 })}</div>
-        </div>
-        
-        <div>
-          <div className="text-sm text-gray-500">Posiciones</div>
-          <div className="text-lg font-semibold">${totalPositionsValue.toLocaleString('es-ES', { minimumFractionDigits: 2 })}</div>
+      {/* Valor Total */}
+      <div className="mb-4">
+        <div className="text-sm text-gray-500">Valor Total</div>
+        <div className="text-xl font-bold">${totalValue.toLocaleString('es-ES', { minimumFractionDigits: 2 })}</div>
+        <div className={`text-xs ${totalPL >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+          {totalPL >= 0 ? '+' : ''}{totalPL.toFixed(2)} ({totalPLPercent.toFixed(2)}%)
         </div>
       </div>
       
-      {/* Rentabilidad */}
-      <div className="mb-3">
+      {/* Efectivo vs Invertido */}
+      <div className="mb-4">
+        <div className="flex justify-between items-center mb-1">
+          <div className="text-sm text-gray-500">Efectivo Disponible</div>
+          <div className="text-sm font-medium">${cash.toLocaleString('es-ES', { minimumFractionDigits: 2 })}</div>
+        </div>
         <div className="flex justify-between items-center">
-          <div className="text-sm text-gray-500">Rentabilidad</div>
-          <div className={`font-semibold ${metrics.totalReturn >= 0 ? 'text-green-600' : 'text-red-600'}`}>
-            {metrics.totalReturn >= 0 ? '+' : ''}{metrics.totalReturn.toFixed(2)}%
-          </div>
+          <div className="text-sm text-gray-500">Invertido</div>
+          <div className="text-sm font-medium">${investedValue.toLocaleString('es-ES', { minimumFractionDigits: 2 })}</div>
         </div>
         
-        <div className="flex justify-between items-center text-xs">
-          <div className="text-gray-500">Hoy:</div>
-          <div className={metrics.dailyReturn >= 0 ? 'text-green-600' : 'text-red-600'}>
-            {metrics.dailyReturn >= 0 ? '+' : ''}{metrics.dailyReturn.toFixed(2)}%
-          </div>
-        </div>
-        
-        <div className="flex justify-between items-center text-xs">
-          <div className="text-gray-500">7 días:</div>
-          <div className={metrics.weeklyReturn >= 0 ? 'text-green-600' : 'text-red-600'}>
-            {metrics.weeklyReturn >= 0 ? '+' : ''}{metrics.weeklyReturn.toFixed(2)}%
-          </div>
-        </div>
-      </div>
-      
-      {/* Distribución de la cartera */}
-      <div className="mb-3">
-        <div className="text-sm text-gray-500 mb-1">Distribución</div>
-        <div className="w-full bg-gray-200 rounded-full h-2 mb-1">
+        {/* Barra de progreso para visualizar la distribución */}
+        <div className="mt-2 h-2 bg-gray-200 rounded-full overflow-hidden">
           <div 
-            className="bg-indigo-600 h-2 rounded-full" 
-            style={{ width: `${positionsPercentage}%` }}
+            className="h-full bg-blue-500" 
+            style={{ width: `${totalValue > 0 ? (investedValue / totalValue) * 100 : 0}%` }}
           ></div>
         </div>
-        <div className="flex justify-between text-xs">
-          <div>Posiciones: {positionsPercentage.toFixed(1)}%</div>
-          <div>Efectivo: {cashPercentage.toFixed(1)}%</div>
+        <div className="flex justify-between text-xs text-gray-500 mt-1">
+          <span>Efectivo: {totalValue > 0 ? ((cash / totalValue) * 100).toFixed(1) : 0}%</span>
+          <span>Invertido: {totalValue > 0 ? ((investedValue / totalValue) * 100).toFixed(1) : 0}%</span>
         </div>
       </div>
       
-      {/* Posiciones */}
-      <div>
-        <div className="text-sm text-gray-500 mb-1">Posiciones</div>
-        <div className="space-y-1 max-h-24 overflow-y-auto">
-          {Object.keys(portfolio.positions).length === 0 ? (
-            <div className="text-sm text-gray-400 italic">Sin posiciones abiertas</div>
-          ) : (
-            Object.entries(portfolio.positions).map(([symbol, position]) => {
-              const value = position.quantity * position.currentPrice;
-              const percentChange = ((position.currentPrice / position.avgCost) - 1) * 100;
-              
-              return (
-                <div key={symbol} className="flex justify-between items-center text-sm">
-                  <div className="font-medium">{symbol}</div>
-                  <div className="flex flex-col items-end">
-                    <div>${value.toLocaleString('es-ES', { minimumFractionDigits: 2 })}</div>
-                    <div className={`text-xs ${percentChange >= 0 ? 'text-green-600' : 'text-red-600'}`}>
-                      {percentChange >= 0 ? '+' : ''}{percentChange.toFixed(2)}%
-                    </div>
-                  </div>
-                </div>
-              );
-            })
-          )}
+      {/* Ganancias/Pérdidas */}
+      <div className="mb-4">
+        <div className="text-sm text-gray-500 mb-1">Rendimiento No Realizado</div>
+        <div className="flex justify-between items-center">
+          <div className={`text-sm ${unrealizedPL >= 0 ? 'text-green-600' : 'text-red-600'} font-medium`}>
+            {unrealizedPL >= 0 ? '+' : ''}{unrealizedPL.toFixed(2)}
+          </div>
+          <div className={`text-sm ${unrealizedPL >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+            ({unrealizedPLPercent.toFixed(2)}%)
+          </div>
+        </div>
+      </div>
+      
+      {/* Posiciones activas */}
+      <div className="mb-4">
+        <div className="text-sm text-gray-500 mb-1">Posiciones Activas</div>
+        <div className="flex justify-between items-center">
+          <div className="text-sm font-medium">{Object.keys(positions).length}</div>
+        </div>
+      </div>
+      
+      {/* Métricas adicionales */}
+      <div className="text-xs text-gray-500 mt-auto">
+        <div className="flex justify-between mb-1">
+          <span>Rendimiento diario:</span>
+          <span className={dailyReturn >= 0 ? 'text-green-600' : 'text-red-600'}>
+            {dailyReturn >= 0 ? '+' : ''}{dailyReturn.toFixed(2)}%
+          </span>
+        </div>
+        <div className="flex justify-between">
+          <span>Rendimiento semanal:</span>
+          <span className={weeklyReturn >= 0 ? 'text-green-600' : 'text-red-600'}>
+            {weeklyReturn >= 0 ? '+' : ''}{weeklyReturn.toFixed(2)}%
+          </span>
         </div>
       </div>
     </div>

@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import { api } from '../services/api';
 import { useNotification } from './NotificationContext';
+import { getAllPredictions, getPrediction } from '../services/api';
 
 // Crear contexto
 const PredictionContext = createContext();
@@ -16,17 +17,18 @@ export const PredictionProvider = ({ children }) => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [activeSymbols, setActiveSymbols] = useState(['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'TSLA']);
+  const [loadingSymbol, setLoadingSymbol] = useState(null);
 
   // Cargar predicciones iniciales para símbolos activos
   useEffect(() => {
     activeSymbols.forEach(symbol => {
-      fetchPredictions(symbol);
+      fetchSinglePrediction(symbol);
     });
     
     // Actualizar cada 5 minutos
     const intervalId = setInterval(() => {
       activeSymbols.forEach(symbol => {
-        fetchPredictions(symbol);
+        fetchSinglePrediction(symbol);
       });
     }, 5 * 60 * 1000);
     
@@ -34,24 +36,20 @@ export const PredictionProvider = ({ children }) => {
   }, [activeSymbols]);
 
   // Obtener predicciones para un símbolo
-  const fetchPredictions = useCallback(async (symbol) => {
+  const fetchSinglePrediction = useCallback(async (symbol) => {
     if (!symbol) return;
-    
-    setLoading(true);
+    setLoadingSymbol(symbol);
     try {
-      const response = await api.getPredictions(symbol);
-      
-      // Actualizar estado
-      setPredictions(prev => ({
-        ...prev,
-        [symbol]: response
-      }));
-      
-      setLoading(false);
+      // Llamar directamente a la función importada
+      const data = await getPrediction(symbol);
+      setPredictions(prev => ({ ...prev, [symbol]: data }));
+      setError(null);
     } catch (err) {
-      console.error(`Error al obtener predicciones para ${symbol}:`, err);
-      setError(`No se pudieron cargar las predicciones para ${symbol}`);
-      setLoading(false);
+      console.error(`Error al obtener predicción para ${symbol}:`, err);
+      setError(`No se pudo cargar la predicción para ${symbol}.`);
+      // Mantener la predicción anterior si existe
+    } finally {
+      setLoadingSymbol(null);
     }
   }, []);
 
@@ -126,11 +124,27 @@ export const PredictionProvider = ({ children }) => {
         return prev.filter(s => s !== symbol);
       } else {
         const newSymbols = [...prev, symbol];
-        fetchPredictions(symbol);
+        fetchSinglePrediction(symbol);
         return newSymbols;
       }
     });
-  }, [fetchPredictions]);
+  }, [fetchSinglePrediction]);
+
+  const fetchPredictions = useCallback(async () => {
+    setLoading(true);
+    try {
+      // Llamar directamente a la función importada
+      const data = await getAllPredictions();
+      setPredictions(data);
+      setError(null);
+    } catch (err) {
+      console.error('Error al obtener predicciones:', err);
+      setError('No se pudieron cargar las predicciones.');
+      setPredictions({}); // En caso de error, establecer un objeto vacío
+    } finally {
+      setLoading(false);
+    }
+  }, []);
 
   return (
     <PredictionContext.Provider 

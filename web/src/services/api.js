@@ -1,555 +1,418 @@
 import axios from 'axios';
-import io from 'socket.io-client';
+// import io from 'socket.io-client'; // Comentado: No usamos Socket.IO
 
-// Configuración de axios
-const axiosInstance = axios.create({
-  timeout: 10000,
+// Configurar axios con valores predeterminados
+const api = axios.create({
+  timeout: 10000, // 10 segundos
   headers: {
     'Content-Type': 'application/json',
+    'Accept': 'application/json'
   }
 });
 
-// Interceptor para manejo de errores
-axiosInstance.interceptors.response.use(
-  response => response.data,
-  error => {
-    console.error('API Error:', error.response || error);
-    return Promise.reject(error.response?.data || error);
+// Añadir interceptor para reintentar solicitudes fallidas
+api.interceptors.response.use(undefined, async (error) => {
+  // Configuración de reintento
+  const maxRetries = 3;
+  const retryDelay = 1000; // 1 segundo
+  
+  // Obtener la configuración de la solicitud original
+  const { config, response = {} } = error;
+  
+  // Si no hay configuración o ya se ha reintentado el máximo de veces, rechazar
+  if (!config || !config.retry) {
+    config.retry = 0;
   }
-);
+  
+  // Si ya se ha reintentado el máximo de veces, rechazar
+  if (config.retry >= maxRetries) {
+    return Promise.reject(error);
+  }
+  
+  // Incrementar el contador de reintentos
+  config.retry += 1;
+  
+  // Crear una nueva promesa para esperar antes de reintentar
+  const delayPromise = new Promise((resolve) => {
+    setTimeout(resolve, retryDelay * config.retry);
+  });
+  
+  // Esperar y luego reintentar la solicitud
+  await delayPromise;
+  return api(config);
+});
 
-// Servicio de API para la plataforma de trading
-export const api = {
-  // ===== Portfolio API =====
-  getPortfolio: async () => {
-    try {
-      return await axiosInstance.get('/api/portfolio');
-    } catch (error) {
-      console.error('Error fetching portfolio:', error);
-      // Fallback para desarrollo/demo
-      return {
-        cash: 100000 + Math.random() * 5000,
-        initialCash: 100000,
-        positions: {
-          AAPL: {
-            symbol: 'AAPL',
-            quantity: 10,
-            avgCost: 152.35,
-            currentPrice: 155.80 + (Math.random() * 2 - 1),
-            marketValue: 1558.00
-          },
-          MSFT: {
-            symbol: 'MSFT',
-            quantity: 5,
-            avgCost: 305.22,
-            currentPrice: 310.65 + (Math.random() * 3 - 1.5),
-            marketValue: 1553.25
-          }
-        },
-        totalValue: 103111.25,
-        lastUpdate: new Date().toISOString()
-      };
+// Datos de fallback simulados para desarrollo
+const fallbackMarketData = {
+  AAPL: {
+    quote: { price: 175.43, percentChange: 1.25 },
+    historical: [/* datos históricos simulados */]
+  },
+  MSFT: {
+    quote: { price: 334.65, percentChange: 0.89 },
+    historical: [/* datos históricos simulados */]
+  },
+  GOOGL: {
+    quote: { price: 135.60, percentChange: -0.45 },
+    historical: [/* datos históricos simulados */]
+  },
+  AMZN: {
+    quote: { price: 145.24, percentChange: 2.10 },
+    historical: [/* datos históricos simulados */]
+  },
+  TSLA: {
+    quote: { price: 254.85, percentChange: -1.32 },
+    historical: [/* datos históricos simulados */]
+  }
+};
+
+const fallbackPredictions = {
+  AAPL: {
+    currentPrice: 175.43,
+    predictions: {
+      '1d': 177.85,
+      '1w': 180.20,
+      '1m': 185.60
+    },
+    accuracy: 0.82
+  },
+  MSFT: {
+    currentPrice: 334.65,
+    predictions: {
+      '1d': 336.20,
+      '1w': 340.50,
+      '1m': 350.75
+    },
+    accuracy: 0.85
+  }
+};
+
+const fallbackPortfolio = {
+  cash: 85000,
+  initialCash: 100000,
+  positions: {
+    AAPL: {
+      symbol: 'AAPL',
+      quantity: 50,
+      averagePrice: 170.25,
+      currentPrice: 175.43
+    },
+    MSFT: {
+      symbol: 'MSFT',
+      quantity: 15,
+      averagePrice: 320.10,
+      currentPrice: 334.65
     }
   },
-  
-  getPortfolioMetrics: async () => {
-    try {
-      return await axiosInstance.get('/api/metrics');
-    } catch (error) {
-      console.error('Error fetching portfolio metrics:', error);
-      // Fallback para desarrollo/demo
-      return {
-        totalReturn: parseFloat((Math.random() * 8 - 2).toFixed(2)),
-        dailyReturn: parseFloat((Math.random() * 2 - 0.5).toFixed(2)),
-        weeklyReturn: parseFloat((Math.random() * 4 - 1).toFixed(2)),
-        monthlyReturn: parseFloat((Math.random() * 6 - 1.5).toFixed(2)),
-        sharpeRatio: parseFloat((Math.random() * 0.5 + 0.8).toFixed(2)),
-        volatility: parseFloat((Math.random() * 0.5 + 0.5).toFixed(2))
-      };
+  totalValue: 95000,
+  lastUpdate: new Date().toISOString()
+};
+
+// Variable para rastrear si estamos en modo de desarrollo
+const isDevelopment = process.env.NODE_ENV === 'development';
+
+// Funciones de API (sin 'export' individual)
+
+const getMarketData = async (symbol) => {
+  try {
+    const response = await api.get(`/market-data/${symbol}`);
+    return response.data;
+  } catch (error) {
+    console.error(`Error al obtener datos de mercado para ${symbol}:`, error);
+    
+    if (isDevelopment && fallbackMarketData[symbol]) {
+      console.log(`Usando datos simulados para ${symbol}`);
+      return fallbackMarketData[symbol];
     }
-  },
-  
-  getOrders: async () => {
-    try {
-      return await axiosInstance.get('/api/orders');
-    } catch (error) {
-      console.error('Error fetching orders:', error);
-      // Fallback para desarrollo/demo
-      return [
-        {
-          id: '1',
-          symbol: 'AAPL',
-          action: 'BUY',
-          quantity: 10,
-          price: 152.35,
-          totalValue: 1523.50,
-          timestamp: new Date(Date.now() - 10 * 24 * 60 * 60 * 1000).toISOString()
-        },
-        {
-          id: '2',
-          symbol: 'MSFT',
-          action: 'BUY',
-          quantity: 5,
-          price: 305.22,
-          totalValue: 1526.10,
-          timestamp: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString()
-        },
-        {
-          id: '3',
-          symbol: 'GOOGL',
-          action: 'BUY',
-          quantity: 3,
-          price: 123.45,
-          totalValue: 370.35,
-          timestamp: new Date(Date.now() - 5 * 24 * 60 * 60 * 1000).toISOString()
-        },
-        {
-          id: '4',
-          symbol: 'GOOGL',
-          action: 'SELL',
-          quantity: 3,
-          price: 126.78,
-          totalValue: 380.34,
-          profit: 9.99,
-          timestamp: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString()
-        }
-      ];
-    }
-  },
-  
-  placeOrder: async (orderData) => {
-    try {
-      // Convertir acción a mayúsculas para que coincida con el backend
-      const formattedOrderData = {
-        ...orderData,
-        action: orderData.action.toUpperCase()  // Convertir "buy" a "BUY", "sell" a "SELL"
-      };
-      
-      return await axiosInstance.post('/api/orders', formattedOrderData);
-    } catch (error) {
-      console.error('Error placing order:', error);
-      // Manejar error específico de fondos insuficientes
-      if (error.detail && error.detail.includes('Fondos insuficientes')) {
-        throw new Error('Fondos insuficientes para esta orden');
-      } else if (error.detail && error.detail.includes('No hay suficientes acciones')) {
-        throw new Error('No hay suficientes acciones para vender');
-      }
-      
-      // Propagar error para que el componente lo maneje
-      throw error;
-    }
-  },
-  
-  // ===== Market Data API =====
-  getQuote: async (symbol) => {
-    try {
-      const response = await axiosInstance.get(`/api/market-data/${symbol}`);
-      return response;
-    } catch (error) {
-      console.error(`Error fetching quote for ${symbol}:`, error);
-      
-      // Manejar errores específicos
-      if (error.response) {
-        if (error.response.status === 404) {
-          console.warn(`No se encontraron datos para ${symbol}`);
-        }
-      }
-      
-      // Fallback para desarrollo/demo
-      const basePrice = symbol === 'AAPL' ? 155 : 
-                        symbol === 'MSFT' ? 310 : 
-                        symbol === 'GOOGL' ? 125 : 
-                        symbol === 'AMZN' ? 140 : 
-                        symbol === 'TSLA' ? 220 : 
-                        symbol === 'IAG.MC' ? 5.25 : 
-                        symbol === 'PHM.MC' ? 70.30 : 
-                        symbol === 'BKY.MC' ? 0.85 : 
-                        symbol === 'AENA.MC' ? 180.45 : 
-                        symbol === 'BA' ? 180.20 : 
-                        symbol === 'NLGO' ? 25.75 : 
-                        symbol === 'CAR' ? 105.30 : 
-                        symbol === 'DLTR' ? 115.50 : 
-                        symbol === 'CANTE.IS' ? 45.20 : 
-                        symbol === 'SASA.IS' ? 32.85 : 100;
-      
-      return {
-        symbol,
-        price: parseFloat((basePrice + (Math.random() * 4 - 2)).toFixed(2)),
-        change: parseFloat((Math.random() * 3 - 1.5).toFixed(2)),
-        percentChange: parseFloat((Math.random() * 2 - 1).toFixed(2)),
-        volume: Math.floor(Math.random() * 5000000 + 1000000),
-        timestamp: new Date().toISOString()
-      };
-    }
-  },
-  
-  getHistoricalData: async (symbol, timeframe = '1h') => {
-    try {
-      // Usar el endpoint correcto que hemos implementado en el broker
-      return await axiosInstance.get(`/historical/${symbol}?timeframe=${timeframe}`);
-    } catch (error) {
-      console.error(`Error fetching historical data for ${symbol}:`, error);
-      // Fallback para desarrollo/demo
-      const basePrice = symbol === 'AAPL' ? 155 : 
-                        symbol === 'MSFT' ? 310 : 
-                        symbol === 'GOOGL' ? 125 : 
-                        symbol === 'AMZN' ? 140 : 
-                        symbol === 'TSLA' ? 220 : 
-                        symbol === 'IAG.MC' ? 5.25 : 
-                        symbol === 'PHM.MC' ? 70.30 : 
-                        symbol === 'BKY.MC' ? 0.85 : 
-                        symbol === 'AENA.MC' ? 180.45 : 
-                        symbol === 'BA' ? 180.20 : 
-                        symbol === 'NLGO' ? 25.75 : 
-                        symbol === 'CAR' ? 105.30 : 
-                        symbol === 'DLTR' ? 115.50 : 
-                        symbol === 'CANTE.IS' ? 45.20 : 
-                        symbol === 'SASA.IS' ? 32.85 : 100;
-      
-      const volatility = symbol === 'TSLA' ? 0.05 : 0.02;
-      
-      // Determinar número de puntos según timeframe
-      let points;
-      switch (timeframe) {
-        case '1m': points = 60; break;
-        case '5m': points = 60; break;
-        case '15m': points = 60; break;
-        case '30m': points = 48; break;
-        case '1h': points = 24; break;
-        case '4h': points = 30; break;
-        case '1d': points = 30; break;
-        default: points = 30;
-      }
-      
-      // Intervalo en milisegundos
-      const intervalMap = {
-        '1m': 60 * 1000,
-        '5m': 5 * 60 * 1000,
-        '15m': 15 * 60 * 1000,
-        '30m': 30 * 60 * 1000,
-        '1h': 60 * 60 * 1000,
-        '4h': 4 * 60 * 60 * 1000,
-        '1d': 24 * 60 * 60 * 1000
-      };
-      
-      const interval = intervalMap[timeframe] || 60 * 60 * 1000;
-      
-      // Generar datos históricos
+    
+    throw new Error(`No se pudieron obtener datos de mercado para ${symbol}`);
+  }
+};
+
+const getHistoricalData = async (symbol, timeframe = '1d') => {
+  try {
+    const response = await api.get(`/historical/${symbol}?timeframe=${timeframe}`);
+    return response.data;
+  } catch (error) {
+    console.error(`Error al obtener datos históricos para ${symbol}:`, error);
+    
+    if (isDevelopment) {
       const now = new Date();
       const data = [];
-      let price = basePrice;
-      
-      for (let i = points - 1; i >= 0; i--) {
-        const date = new Date(now.getTime() - i * interval);
-        
-        // Simular movimiento de precio
-        const change = (Math.random() - 0.5) * volatility * price;
-        price = Math.max(price + change, basePrice * 0.5);
-        
-        // Generar OHLC
-        const open = price;
-        const high = price * (1 + Math.random() * volatility * 0.5);
-        const low = price * (1 - Math.random() * volatility * 0.5);
-        const close = price * (1 + (Math.random() - 0.5) * volatility * 0.3);
-        
+      for (let i = 30; i >= 0; i--) {
+        const date = new Date(now.getTime() - i * 24 * 60 * 60 * 1000);
         data.push({
-          date: date.toISOString(),
-          open: parseFloat(open.toFixed(2)),
-          high: parseFloat(high.toFixed(2)),
-          low: parseFloat(low.toFixed(2)),
-          close: parseFloat(close.toFixed(2)),
-          volume: Math.floor(Math.random() * 5000000 + 1000000)
+          date: date.toISOString().split('T')[0],
+          open: Math.random() * 10 + 150,
+          high: Math.random() * 10 + 155,
+          low: Math.random() * 10 + 145,
+          close: Math.random() * 10 + 150,
+          volume: Math.floor(Math.random() * 10000000)
         });
       }
-      
       return data;
     }
-  },
-  
-  // ===== Predictions API =====
-  getPredictions: async (symbol) => {
-    try {
-      const response = await axiosInstance.get(`/prediction/${symbol}`);
-      return response;
-    } catch (error) {
-      console.error(`Error fetching predictions for ${symbol}:`, error);
-      
-      // Si hay un error específico, manejarlo adecuadamente
-      if (error.response && error.response.status === 404) {
-        console.warn(`No se encontraron predicciones para ${symbol}`);
-      }
-      
-      // Fallback para desarrollo/demo
-      const basePrice = symbol === 'AAPL' ? 155 : 
-                        symbol === 'MSFT' ? 310 : 
-                        symbol === 'GOOGL' ? 125 : 
-                        symbol === 'AMZN' ? 140 : 
-                        symbol === 'TSLA' ? 220 : 100;
-      
-      // Crear predicciones con sesgo ligeramente alcista
-      const currentPrice = basePrice + (Math.random() * 4 - 2);
-      const predictions = {
-        '15m': parseFloat((currentPrice * (1 + (Math.random() * 0.01 - 0.003))).toFixed(2)),
-        '30m': parseFloat((currentPrice * (1 + (Math.random() * 0.015 - 0.005))).toFixed(2)),
-        '1h': parseFloat((currentPrice * (1 + (Math.random() * 0.02 - 0.007))).toFixed(2)),
-        '3h': parseFloat((currentPrice * (1 + (Math.random() * 0.03 - 0.01))).toFixed(2)),
-        '1d': parseFloat((currentPrice * (1 + (Math.random() * 0.04 - 0.01))).toFixed(2))
-      };
-      
-      return {
-        symbol,
-        currentPrice: parseFloat(currentPrice.toFixed(2)),
-        predictions,
-        timestamp: new Date().toISOString(),
-        modelMetrics: {
-          MAPE: parseFloat((Math.random() * 2 + 1).toFixed(2)),
-          RMSE: parseFloat((Math.random() * 3 + 1.5).toFixed(2)),
-          accuracy: parseFloat((Math.random() * 10 + 85).toFixed(2))
-        }
-      };
-    }
-  },
-  
-  getPredictionHistory: async (symbol) => {
-    try {
-      const response = await axiosInstance.get(`/prediction/history/${symbol}`);
-      return response;
-    } catch (error) {
-      console.error(`Error fetching prediction history for ${symbol}:`, error);
-      
-      // Si hay un error específico, manejarlo adecuadamente
-      if (error.response && error.response.status === 404) {
-        console.warn(`No se encontró historial de predicciones para ${symbol}`);
-      }
-      
-      // Fallback para desarrollo/demo
-      const basePrice = symbol === 'AAPL' ? 155 : 
-                        symbol === 'MSFT' ? 310 : 
-                        symbol === 'GOOGL' ? 125 : 
-                        symbol === 'AMZN' ? 140 : 
-                        symbol === 'TSLA' ? 220 : 100;
-      
-      // Crear historial de verificaciones de predicciones
-      const history = [];
-      const horizons = ['15m', '30m', '1h', '3h', '1d'];
-      
-      // Generar datos para las últimas 24 horas con ciclos de 1h
-      for (let i = 0; i < 24; i++) {
-        const timestamp = new Date(Date.now() - i * 60 * 60 * 1000).toISOString();
-        
-        // Generar verificaciones para cada horizonte
-        horizons.forEach(horizon => {
-          const predictedPrice = basePrice * (1 + (Math.random() * 0.04 - 0.01));
-          const actualPrice = basePrice * (1 + (Math.random() * 0.04 - 0.01));
-          const error = Math.abs(actualPrice - predictedPrice);
-          const errorPct = (error / actualPrice) * 100;
-          
-          history.push({
-            timestamp,
-            horizon,
-            predictedPrice: parseFloat(predictedPrice.toFixed(2)),
-            actualPrice: parseFloat(actualPrice.toFixed(2)),
-            error: parseFloat(error.toFixed(2)),
-            errorPct: parseFloat(errorPct.toFixed(2))
-          });
-        });
-      }
-      
-      return history;
-    }
-  },
-  
-  // ===== Model Status API =====
-  getModelStatus: async () => {
-    try {
-      return await axiosInstance.get('/api/model-status');
-    } catch (error) {
-      console.error('Error fetching model status:', error);
-      // Si hay un error específico, manéjalo adecuadamente
-      if (error.response && error.response.status === 404) {
-        console.warn('El endpoint de model-status no está disponible');
-      }
-      
-      // Usar fallback
-      return {
-        online: {
-          status: ['healthy', 'degraded', 'critical'][Math.floor(Math.random() * 3)],
-          accuracy: parseFloat((Math.random() * 10 + 85).toFixed(2)),
-          metrics: {
-            MAPE: parseFloat((Math.random() * 3 + 1).toFixed(2)),
-            RMSE: parseFloat((Math.random() * 2 + 1).toFixed(2)),
-            accuracy: parseFloat((Math.random() * 10 + 85).toFixed(2))
-          },
-          lastUpdated: new Date().toISOString()
-        },
-        batch: {
-          status: ['healthy', 'degraded', 'critical'][Math.floor(Math.random() * 3)],
-          accuracy: parseFloat((Math.random() * 7 + 88).toFixed(2)),
-          metrics: {
-            MAPE: parseFloat((Math.random() * 2 + 0.8).toFixed(2)),
-            RMSE: parseFloat((Math.random() * 1.5 + 0.8).toFixed(2)),
-            accuracy: parseFloat((Math.random() * 7 + 88).toFixed(2))
-          },
-          lastUpdated: new Date().toISOString()
-        },
-        ensemble: {
-          status: ['healthy', 'degraded', 'critical'][Math.floor(Math.random() * 3)],
-          accuracy: parseFloat((Math.random() * 5 + 90).toFixed(2)),
-          metrics: {
-            MAPE: parseFloat((Math.random() * 1.5 + 0.5).toFixed(2)),
-            RMSE: parseFloat((Math.random() * 1 + 0.5).toFixed(2)),
-            accuracy: parseFloat((Math.random() * 5 + 90).toFixed(2))
-          },
-          lastUpdated: new Date().toISOString()
-        },
-        lastUpdated: new Date().toISOString()
-      };
-    }
-  },
-  
-  // ===== Broker Chat API =====
-  sendChatMessage: async (message, conversationId = null) => {
-    try {
-      // Asegurarse de que el formato de datos coincide con lo que espera el backend
-      const chatRequest = {
-        message: message,
-        conversation_id: conversationId
-      };
-      
-      // Usar directamente el endpoint /chat que configuramos en Nginx
-      return await axiosInstance.post('/chat', chatRequest);
-    } catch (error) {
-      console.error('Error sending chat message:', error);
-      
-      // Manejar errores específicos
-      if (error.response) {
-        if (error.response.status === 404) {
-          console.warn('El servicio de chat no está disponible');
-        } else if (error.response.status === 400) {
-          console.warn('Solicitud de chat inválida:', error.response.data);
-        }
-      }
-      
-      // Fallback para desarrollo/demo
-      const responses = [
-        "Basado en el análisis técnico actual, veo señales mixtas en el mercado. Los principales índices muestran divergencias, con tecnología mostrando fortaleza mientras otros sectores consolidan. Recomendaría mantener posiciones diversificadas con sesgo defensivo a corto plazo.",
-        "El análisis de volumen muestra acumulación institucional en el sector tecnológico, particularmente en semiconductores y cloud computing. Esto sugiere potencial alcista en estas áreas durante las próximas semanas.",
-        "Las condiciones macroeconómicas actuales favorecen empresas con balances sólidos y generación de caja estable. Recomiendo enfocarse en calidad sobre crecimiento en este entorno.",
-        "Los indicadores técnicos para AAPL sugieren soporte en $150. El RSI está en zona neutral (55) y el MACD muestra divergencia alcista. Considero que es un buen momento para acumular posiciones con stop loss en $145.",
-        "La diversificación es clave en este mercado. Recomiendo una distribución de 40% tecnología, 20% consumo básico, 15% salud, 15% financieras y 10% en efectivo para aprovechar oportunidades."
-      ];
-      
-      return {
-        response: responses[Math.floor(Math.random() * responses.length)],
-        conversation_id: conversationId || `conv-${Math.random().toString(36).substring(2, 9)}`
-      };
-    }
-  },
-  
-  getStrategy: async (symbol) => {
-    try {
-      const response = await axiosInstance.get(`/api/strategy/${symbol}`);
-      return response;
-    } catch (error) {
-      console.error(`Error fetching strategy for ${symbol}:`, error);
-      
-      // Manejar errores específicos
-      if (error.response) {
-        if (error.response.status === 404) {
-          console.warn(`No se encontró estrategia para ${symbol}`);
-        }
-      }
-      
-      // Fallback para desarrollo/demo
-      const basePrice = symbol === 'AAPL' ? 155 : 
-                        symbol === 'MSFT' ? 310 : 
-                        symbol === 'GOOGL' ? 125 : 
-                        symbol === 'AMZN' ? 140 : 
-                        symbol === 'TSLA' ? 220 : 100;
-      
-      const actions = ['comprar', 'vender', 'mantener'];
-      // Sesgo hacia comprar para AAPL y MSFT
-      const actionIndex = (symbol === 'AAPL' || symbol === 'MSFT') ? 
-                         Math.floor(Math.random() * 1.5) : 
-                         Math.floor(Math.random() * 3);
-      
-      return {
-        symbol,
-        summary: `Análisis estratégico para ${symbol} basado en patrones técnicos, indicadores y condiciones de mercado actuales.`,
-        recommendation: {
-          action: actions[actionIndex],
-          price: parseFloat((basePrice + (Math.random() * 4 - 2)).toFixed(2)),
-          quantity: Math.floor(Math.random() * 10) + 1,
-          stopLoss: parseFloat((basePrice * 0.95).toFixed(2)),
-          takeProfit: parseFloat((basePrice * 1.1).toFixed(2)),
-          confidence: Math.floor(Math.random() * 15) + 75,
-          timeframe: "corto plazo"
-        },
-        factors: [
-          "Tendencia alcista confirmada en múltiples timeframes",
-          "Soportes sólidos establecidos en niveles recientes",
-          "Volumen creciente en movimientos alcistas",
-          "Indicadores técnicos en zonas favorables"
-        ],
-        technicalMetrics: {
-          RSI: parseFloat((Math.random() * 20 + 45).toFixed(2)),
-          MACD: parseFloat((Math.random() * 2 - 0.5).toFixed(2)),
-          Volumen: Math.floor(Math.random() * 5000000 + 2000000),
-          SMA50: parseFloat((basePrice * (1 + (Math.random() * 0.05 - 0.02))).toFixed(2)),
-          SMA200: parseFloat((basePrice * (1 + (Math.random() * 0.1 - 0.05))).toFixed(2))
-        }
-      };
-    }
-  },
-  
-  // ===== WebSocket para datos en tiempo real =====
-  connectToMarketSocket: (symbols) => {
-    // En un entorno real, esto se conectaría a un WebSocket del servidor
-    // Para desarrollo/demo, simulamos los eventos
     
-    const mockSocket = {
-      listeners: {},
-      
-      on: function(event, callback) {
-        this.listeners[event] = callback;
-      },
-      
-      emit: function(event, data) {
-        if (this.listeners[event]) {
-          this.listeners[event](data);
-        }
-      },
-      
-      disconnect: function() {
-        clearInterval(this.interval);
-        console.log('Mock WebSocket disconnected');
-      }
-    };
-    
-    // Simular actualizaciones de mercado cada segundo
-    mockSocket.interval = setInterval(() => {
-      if (symbols && symbols.length > 0) {
-        const symbol = symbols[Math.floor(Math.random() * symbols.length)];
-        const basePrice = symbol === 'AAPL' ? 155 : 
-                          symbol === 'MSFT' ? 310 : 
-                          symbol === 'GOOGL' ? 125 : 
-                          symbol === 'AMZN' ? 140 : 
-                          symbol === 'TSLA' ? 220 : 100;
-        
-        const change = (Math.random() - 0.5) * 0.5;
-        const percentChange = (change / basePrice) * 100;
-        
-        mockSocket.emit('market_update', {
-          symbol,
-          price: parseFloat((basePrice + change).toFixed(2)),
-          change: parseFloat(change.toFixed(2)),
-          percentChange: parseFloat(percentChange.toFixed(2)),
-          volume: Math.floor(Math.random() * 10000 + 5000),
-          timestamp: new Date().toISOString()
-        });
-      }
-    }, 1000);
-    
-    return mockSocket;
+    throw new Error(`No se pudieron obtener datos históricos para ${symbol}`);
   }
+};
+
+const getPrediction = async (symbol) => {
+  try {
+    const response = await api.get(`/predictions/${symbol}`);
+    return response.data;
+  } catch (error) {
+    console.error(`Error al obtener predicciones para ${symbol}:`, error);
+    
+    if (isDevelopment && fallbackPredictions[symbol]) {
+      console.log(`Usando predicciones simuladas para ${symbol}`);
+      return fallbackPredictions[symbol];
+    } else if (isDevelopment) {
+      const currentPrice = fallbackMarketData[symbol]?.quote?.price || 100 + Math.random() * 50;
+      return {
+        currentPrice,
+        predictions: {
+          '1d': currentPrice * (1 + (Math.random() * 0.04 - 0.02)),
+          '1w': currentPrice * (1 + (Math.random() * 0.08 - 0.03)),
+          '1m': currentPrice * (1 + (Math.random() * 0.15 - 0.05))
+        },
+        accuracy: 0.7 + Math.random() * 0.2
+      };
+    }
+    
+    throw new Error(`No se pudieron obtener predicciones para ${symbol}`);
+  }
+};
+
+const getAllPredictions = async () => {
+  try {
+    const response = await api.get('/predictions');
+    return response.data;
+  } catch (error) {
+    console.error('Error al obtener todas las predicciones:', error);
+    
+    if (isDevelopment) {
+      return fallbackPredictions;
+    }
+    
+    throw new Error('No se pudieron obtener las predicciones');
+  }
+};
+
+const getActiveSymbols = async () => {
+  try {
+    const response = await api.get('/symbols');
+    return response.data;
+  } catch (error) {
+    console.error('Error al obtener símbolos activos:', error);
+    
+    if (isDevelopment) {
+      return Object.keys(fallbackMarketData);
+    }
+    
+    throw new Error('No se pudieron obtener los símbolos activos');
+  }
+};
+
+const getPortfolio = async () => {
+  try {
+    const response = await api.get('/portfolio');
+    return response.data;
+  } catch (error) {
+    console.error('Error al obtener portafolio:', error);
+    
+    if (isDevelopment) {
+      console.log('Usando portafolio simulado');
+      const positions = { ...fallbackPortfolio.positions };
+      let totalPositionValue = 0;
+      Object.keys(positions).forEach(symbol => {
+        const position = positions[symbol];
+        position.currentPrice = fallbackMarketData[symbol]?.quote?.price || position.currentPrice;
+        totalPositionValue += position.currentPrice * position.quantity;
+      });
+      const updatedPortfolio = {
+        ...fallbackPortfolio,
+        positions,
+        totalValue: fallbackPortfolio.cash + totalPositionValue,
+        lastUpdate: new Date().toISOString()
+      };
+      return updatedPortfolio;
+    }
+    
+    throw new Error('No se pudo obtener el portafolio');
+  }
+};
+
+const getPortfolioMetrics = async () => {
+  try {
+    const response = await api.get('/portfolio/metrics');
+    return response.data;
+  } catch (error) {
+    console.error('Error al obtener métricas del portafolio:', error);
+    
+    if (isDevelopment) {
+      return {
+        totalReturn: 5.67,
+        dailyReturn: 0.82,
+        weeklyReturn: 2.34,
+        monthlyReturn: 5.67,
+        sharpeRatio: 1.23,
+        volatility: 12.5
+      };
+    }
+    
+    throw new Error('No se pudieron obtener las métricas del portafolio');
+  }
+};
+
+const getOrders = async () => {
+  try {
+    const response = await api.get('/portfolio/orders');
+    return response.data;
+  } catch (error) {
+    console.error('Error al obtener órdenes:', error);
+    
+    if (isDevelopment) {
+      const now = new Date();
+      return [
+        {
+          id: '12345',
+          symbol: 'AAPL',
+          quantity: 10,
+          price: 170.25,
+          action: 'buy',
+          timestamp: new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString(),
+          status: 'completed'
+        },
+        {
+          id: '12346',
+          symbol: 'MSFT',
+          quantity: 5,
+          price: 320.10,
+          action: 'buy',
+          timestamp: new Date(now.getTime() - 5 * 24 * 60 * 60 * 1000).toISOString(),
+          status: 'completed'
+        }
+      ];
+    }
+    
+    throw new Error('No se pudieron obtener las órdenes');
+  }
+};
+
+const placeOrder = async (orderData) => {
+  try {
+    const response = await api.post('/portfolio/orders', orderData);
+    return response.data;
+  } catch (error) {
+    console.error('Error al colocar orden:', error);
+    
+    if (isDevelopment) {
+      return {
+        id: Math.floor(Math.random() * 100000).toString(),
+        ...orderData,
+        timestamp: new Date().toISOString(),
+        status: 'completed'
+      };
+    }
+    
+    throw new Error('No se pudo colocar la orden');
+  }
+};
+
+const getModelStatus = async () => {
+  try {
+    const response = await api.get('/models/status');
+    return response.data;
+  } catch (error) {
+    console.error('Error al obtener estado de modelos:', error);
+    
+    if (isDevelopment) {
+      return {
+        ensemble: {
+          status: 'healthy',
+          accuracy: 85.2,
+          lastUpdate: new Date().toISOString(),
+          models: ['random_forest', 'gradient_boost', 'elastic_net']
+        },
+        models: {
+          random_forest: {
+            status: 'healthy',
+            accuracy: 82.1,
+            lastUpdate: new Date().toISOString()
+          },
+          gradient_boost: {
+            status: 'healthy',
+            accuracy: 86.5,
+            lastUpdate: new Date().toISOString()
+          },
+          elastic_net: {
+            status: 'degraded',
+            accuracy: 78.9,
+            lastUpdate: new Date().toISOString()
+          }
+        }
+      };
+    }
+    
+    throw new Error('No se pudo obtener el estado de los modelos');
+  }
+};
+
+// --- NUEVA FUNCION PARA WEBSOCKET DE DATOS DE MERCADO ---
+const connectMarketDataWebSocket = (symbols, onOpen, onMessage, onError, onClose) => {
+  const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const wsUrl = `${wsProtocol}//${window.location.host}/ws/market`;
+  console.log(`Conectando a WebSocket de Mercado: ${wsUrl}`);
+
+  const socket = new WebSocket(wsUrl);
+
+  socket.onopen = () => {
+    console.log('WebSocket de Mercado conectado.');
+    if (onOpen) onOpen();
+    // Ejemplo:
+    // if (symbols && symbols.length > 0) {
+    //   socket.send(JSON.stringify({ type: 'subscribe', symbols: symbols }));
+    // }
+  };
+
+  socket.onmessage = (event) => {
+    try {
+      const data = JSON.parse(event.data);
+      console.debug('Mensaje WebSocket recibido (Mercado):', data);
+      if (onMessage) onMessage(data);
+    } catch (e) {
+      console.error('Error parseando mensaje WebSocket (Mercado):', e);
+      if (onError) onError(e);
+    }
+  };
+
+  socket.onerror = (error) => {
+    console.error('Error en WebSocket de Mercado:', error);
+    if (onError) onError(error);
+  };
+
+  socket.onclose = (event) => {
+    console.log('WebSocket de Mercado desconectado:', event.code, event.reason);
+    if (onClose) onClose(event);
+  };
+
+  return socket;
+};
+// --- FIN NUEVA FUNCION ---
+
+// Exportar la instancia de axios y todas las funciones de la API
+export {
+  api,
+  getMarketData,
+  getHistoricalData,
+  getPrediction,
+  getAllPredictions,
+  getActiveSymbols,
+  getPortfolio,
+  getPortfolioMetrics,
+  getOrders,
+  placeOrder,
+  getModelStatus,
+  connectMarketDataWebSocket
 };

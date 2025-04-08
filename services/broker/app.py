@@ -12,6 +12,7 @@ from kafka import KafkaConsumer, KafkaProducer
 import requests
 from llama_agent import ChatMessage, ChatResponse, get_llama_agent
 import threading
+import re
 
 # Configuración de logging
 logging.basicConfig(
@@ -251,6 +252,29 @@ async def health_check():
         "timestamp": datetime.now().isoformat(),
         "kafka_connected": producer is not None
     }
+
+@app.get("/symbols")
+async def get_symbols():
+    """Obtener lista de todos los símbolos disponibles"""
+    try:
+        # Lista de símbolos utilizados en el servicio de ingestion
+        ingestion_symbols = [
+            "AAPL", "GOOGL", "MSFT", "AMZN", "TSLA", 
+            "META", "NVDA", "NFLX", "INTC", "AMD",
+            "IAG.MC", "PHM.MC", "AENA.MC", "BA", 
+            "CAR", "DLTR", "SASA.IS"
+        ]
+        
+        # Obtener símbolos de la caché del agente
+        agent_symbols = llama_agent.cache.get_all_symbols() or []
+        
+        # Combinar ambas listas sin duplicados
+        all_symbols = list(set(ingestion_symbols + agent_symbols))
+            
+        return {"symbols": all_symbols}
+    except Exception as e:
+        logger.error(f"Error obteniendo símbolos: {e}")
+        raise HTTPException(status_code=500, detail=f"Error interno: {str(e)}")
 
 @app.get("/portfolio")
 async def get_portfolio():
@@ -608,6 +632,58 @@ async def chat_with_broker(chat_request: ChatRequest):
     
     return response
 
+@app.get("/market-data/recent")
+async def get_recent_market_data(symbol: str, limit: int = 1):
+    """
+    Obtener datos de mercado recientes para un símbolo con un límite opcional
+    """
+    try:
+        # Validar parámetros
+        if not symbol:
+            raise HTTPException(status_code=400, detail="Se debe proporcionar un símbolo")
+        
+        if limit < 1:
+            limit = 1
+        
+        # Primero intentamos obtener datos de mercado desde el agente
+        market_data = llama_agent.cache.get_market_data(symbol)
+        
+        if market_data:
+            # Devolvemos una respuesta JSON estructurada
+            return {
+                "symbol": symbol,
+                "price": market_data.price,
+                "change": market_data.change,
+                "volume": market_data.volume,
+                "timestamp": datetime.now().isoformat()
+            }
+        else:
+            # Si el agente no tiene datos, intentamos obtenerlos desde la API
+            try:
+                url = f"https://financialmodelingprep.com/api/v3/quote/{symbol}?apikey={FMP_API_KEY}"
+                response = requests.get(url, timeout=10)
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    if data and len(data) > 0:
+                        quote = data[0]
+                        return {
+                            "symbol": symbol,
+                            "price": quote.get('price', 0),
+                            "change": quote.get('change', 0),
+                            "percentChange": quote.get('changesPercentage', 0),
+                            "volume": quote.get('volume', 0),
+                            "timestamp": datetime.now().isoformat()
+                        }
+            except Exception as e:
+                logger.error(f"Error obteniendo datos de mercado recientes para {symbol} desde API: {e}")
+            
+            # Si aún no hay datos, lanzamos la excepción
+            raise HTTPException(status_code=404, detail=f"No hay datos recientes disponibles para {symbol}")
+    except Exception as e:
+        logger.error(f"Error en get_recent_market_data para {symbol}: {e}")
+        raise HTTPException(status_code=500, detail=f"Error interno: {str(e)}")
+
 @app.get("/market-data/{symbol}")
 async def get_market_data(symbol: str):
     """
@@ -641,19 +717,18 @@ async def get_market_data(symbol: str):
             # Si aún no hay datos, lanzamos la excepción
             raise HTTPException(status_code=404, detail=f"No hay datos disponibles para {symbol}")
         
-        # Reformatear respuesta para que coincida con lo que espera el frontend
+        # El market_data_response es un string, no un diccionario, por lo que no podemos usar get()
+        # Devolvemos una respuesta JSON estructurada
         return {
             "symbol": symbol,
-            "price": float(market_data_response.get('price', 0)),
-            "change": float(market_data_response.get('change', 0)),
-            "percentChange": float(market_data_response.get('percentChange', 0)),
-            "volume": int(market_data_response.get('volume', 0)),
-            "timestamp": datetime.now().isoformat(),
-            "analysis": market_data_response
+            "data": market_data_response,
+            "timestamp": datetime.now().isoformat()
         }
-    except Exception as e:
-        logger.error(f"Error en get_market_data para {symbol}: {e}")
-        raise HTTPException(status_code=500, detail=f"Error interno: {str(e)}")
+    except HTTPException: # Deja pasar las excepciones HTTP (como 404)
+        raise
+    except Exception as e: # Captura otros errores inesperados
+        logger.error(f"Error inesperado en get_market_data para {symbol}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error interno inesperado al procesar {symbol}")
 
 @app.get("/predictions/{symbol}")
 async def get_predictions(symbol: str):
@@ -673,40 +748,59 @@ async def get_strategy(symbol: str):
     """
     Obtener estrategia de inversión para un símbolo
     """
-    # Generar estrategia desde el agente
-    strategy_response = llama_agent._get_investment_strategy(symbol)
-    
-    if not strategy_response or "No pude generar" in strategy_response:
-        raise HTTPException(status_code=404, detail=f"No se pudo generar estrategia para {symbol}")
-    
-    # Reformatear respuesta para que coincida con lo que espera el frontend
-    basePrice = 0
     try:
-        url = f"https://financialmodelingprep.com/api/v3/quote/{symbol}?apikey={FMP_API_KEY}"
-        response = requests.get(url, timeout=10)
-        if response.status_code == 200:
-            data = response.json()
-            if data and len(data) > 0:
-                basePrice = float(data[0]['price'])
+        # Generar estrategia desde el agente
+        strategy_response = llama_agent._get_investment_strategy(symbol)
+        
+        if not strategy_response or "No pude generar" in strategy_response:
+            raise HTTPException(status_code=404, detail=f"No se pudo generar estrategia para {symbol}")
+        
+        # El strategy_response es un string, no un diccionario
+        # Obtener precio base para cálculos
+        basePrice = 0
+        try:
+            url = f"https://financialmodelingprep.com/api/v3/quote/{symbol}?apikey={FMP_API_KEY}"
+            response = requests.get(url, timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                if data and len(data) > 0:
+                    basePrice = float(data[0]['price'])
+        except Exception as e:
+            logger.error(f"Error obteniendo precio para estrategia {symbol}: {e}")
+            basePrice = 150  # Precio por defecto
+        
+        # Extraer acción recomendada del texto de la respuesta
+        action = "mantener"  # valor por defecto
+        if "Recomendación: BUY" in strategy_response or "Recomendación: COMPRAR" in strategy_response:
+            action = "comprar"
+        elif "Recomendación: SELL" in strategy_response or "Recomendación: VENDER" in strategy_response:
+            action = "vender"
+        
+        # Extraer confianza si está disponible en el texto
+        confidence = 75  # valor por defecto
+        confidence_match = re.search(r"Confianza: (\d+\.?\d*)%", strategy_response)
+        if confidence_match:
+            confidence = int(float(confidence_match.group(1)))
+        
+        return {
+            "symbol": symbol,
+            "summary": f"Análisis estratégico para {symbol}",
+            "recommendation": {
+                "action": action,
+                "price": float(basePrice),
+                "quantity": 1,
+                "stopLoss": float(basePrice * 0.95),
+                "takeProfit": float(basePrice * 1.05),
+                "confidence": confidence,
+                "timeframe": "corto plazo"
+            },
+            "factors": [],
+            "technicalMetrics": {},
+            "analysis": strategy_response
+        }
     except Exception as e:
-        logger.error(f"Error obteniendo precio para estrategia {symbol}: {e}")
-        basePrice = 150  # Precio por defecto
-    
-    return {
-        "symbol": symbol,
-        "summary": strategy_response.get('summary', f"Análisis estratégico para {symbol}"),
-        "recommendation": {
-            "action": strategy_response.get('action', 'mantener'),
-            "price": float(strategy_response.get('price', basePrice)),
-            "quantity": int(strategy_response.get('quantity', 1)),
-            "stopLoss": float(strategy_response.get('stopLoss', basePrice * 0.95)),
-            "takeProfit": float(strategy_response.get('takeProfit', basePrice * 1.05)),
-            "confidence": int(strategy_response.get('confidence', 75)),
-            "timeframe": strategy_response.get('timeframe', "corto plazo")
-        },
-        "factors": strategy_response.get('factors', []),
-        "technicalMetrics": strategy_response.get('technicalMetrics', {})
-    }
+        logger.error(f"Error en get_strategy para {symbol}: {e}")
+        raise HTTPException(status_code=500, detail=f"Error interno: {str(e)}")
 
 @app.get("/historical/{symbol}")
 async def get_historical_data(symbol: str, timeframe: str = "1d"):

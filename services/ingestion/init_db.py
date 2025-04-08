@@ -1,7 +1,14 @@
 import logging
 from sqlalchemy import create_engine, text
-from config import DB_URI
+import os
+from dotenv import load_dotenv
 import time
+
+# Cargar variables de entorno
+load_dotenv()
+
+# Override DB_URI para asegurar que usa el host postgres
+DB_URI = "postgresql://market_admin:postgres@postgres:5432/market_data"
 
 # Configura el logging
 logging.basicConfig(
