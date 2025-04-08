@@ -330,14 +330,30 @@ def train_models(df: pd.DataFrame, symbol: str) -> dict:
         gc.collect()
         
         # Preparar datos con reducción de memoria
-        X = df.drop(['target_next_return', 'target_next_close', 'datetime', 'open', 'high', 'low', 'close', 'volume', 'symbol'], axis=1, errors='ignore')
+        # Asegurarnos de eliminar completamente la columna datetime y otras columnas no numéricas
+        columns_to_remove = ['target_next_return', 'target_next_close', 'datetime', 'open', 'high', 'low', 'close', 'volume', 'symbol']
+        feature_columns = [col for col in df.columns if col not in columns_to_remove]
+        
+        # Filtrar solo columnas numéricas para evitar errores con datetime u otros tipos no numéricos
+        X = df[feature_columns].select_dtypes(include=['int64', 'float64'])
         y = df['target_next_close']
         
+        # Verificar que no hay valores nulos o infinitos en X
+        X = X.replace([np.inf, -np.inf], np.nan)
+        if X.isna().any().any():
+            logger.warning(f"Se encontraron NaNs en características de {symbol}, imputando con media...")
+            # Imputar NaNs con la media de cada columna
+            X = X.fillna(X.mean())
+        
         # Verificar que no hay columnas categóricas o texto en el dataframe
-        object_columns = X.select_dtypes(include=['object', 'string']).columns
+        object_columns = X.select_dtypes(include=['object', 'string', 'datetime64']).columns
         if not object_columns.empty:
-            logger.warning(f"Eliminando columnas categóricas/texto: {list(object_columns)}")
+            logger.warning(f"Eliminando columnas categóricas/datetime: {list(object_columns)}")
             X = X.drop(columns=object_columns)
+        
+        # Verificar que tenemos suficientes características después de la limpieza
+        if X.shape[1] < 5:
+            logger.warning(f"Pocas características para {symbol} ({X.shape[1]}), puede afectar el rendimiento del modelo")
         
         # Obtener solo las características más importantes usando Random Forest para reducir dimensionalidad
         if X.shape[1] > 30:
@@ -446,7 +462,7 @@ def train_models(df: pd.DataFrame, symbol: str) -> dict:
                 gc.collect()
                 
             except Exception as e:
-                logger.error(f"Error entrenando {model_name} para {symbol}: {e}")
+                logger.error(f"Error entrenando {model_name} para {symbol}: {e}", exc_info=True)
                 model_results[model_name] = {'error': str(e)}
         
         # Si no se pudo entrenar ningún modelo
@@ -579,7 +595,7 @@ def train_models(df: pd.DataFrame, symbol: str) -> dict:
         }
     
     except Exception as e:
-        logger.error(f"Error en train_models para {symbol}: {e}")
+        logger.error(f"Error en train_models para {symbol}: {e}", exc_info=True)
         return {"status": "error", "message": str(e)}
 
 def save_model(model_data: Dict[str, Any], symbol: str) -> str:

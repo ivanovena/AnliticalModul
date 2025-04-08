@@ -29,6 +29,7 @@ FMP_BASE_URL = os.environ.get('FMP_BASE_URL', 'https://financialmodelingprep.com
 FMP_STABLE_URL = os.environ.get('FMP_STABLE_URL', 'https://financialmodelingprep.com/stable')
 KAFKA_BROKER = os.environ.get('KAFKA_BROKER', 'kafka:9092') 
 INGESTION_TOPIC = os.environ.get('INGESTION_TOPIC', 'ingestion_events')
+REALTIME_TOPIC = os.environ.get('REALTIME_TOPIC', 'realtime_events')  # Nuevo topic para datos en tiempo real
 DB_URI = os.environ.get('DB_URI', 'postgresql://postgres:postgres@postgres:5432/trading')
 REALTIME_INTERVAL_SECONDS = int(os.environ.get('REALTIME_INTERVAL_SECONDS', 300))  # 5 minutos por defecto
 
@@ -354,6 +355,79 @@ class IngestionManager:
         
         return []
     
+    def fetch_daily_data(self, symbol, start_date, end_date):
+        """Obtener datos históricos diarios"""
+        try:
+            # Convertir fechas a formato de string yyyy-MM-dd
+            start_str = start_date.strftime('%Y-%m-%d')
+            end_str = end_date.strftime('%Y-%m-%d')
+            
+            # Construir URL con formato correcto para la API de FMP
+            url = f"{self.base_url}/historical-price-full/{symbol}?from={start_str}&to={end_str}&apikey={self.api_key}"
+            logger.info(f"Fetching daily data for {symbol} from {start_str} to {end_str}")
+            
+            # Realizar la petición con timeout adecuado
+            response = requests.get(url, timeout=30)
+            
+            if response.status_code == 200:
+                data = response.json()
+                
+                if data and 'historical' in data:
+                    # Procesar datos
+                    processed_data = []
+                    data_type = "daily"
+                    
+                    for item in data['historical']:
+                        try:
+                            # Procesar fecha y timestamp
+                            datetime_str = item.get('date')
+                            if not datetime_str:
+                                logger.warning(f"Missing date in data point for {symbol} daily")
+                                continue
+                                
+                            record_datetime = datetime.strptime(datetime_str, '%Y-%m-%d')
+                            record_timestamp = int(record_datetime.timestamp())
+                            
+                            # Verificar si este registro específico ya existe
+                            if self.check_record_exists(symbol, data_type, datetime_str):
+                                logger.debug(f"Skipping duplicate daily data point for {symbol} at {datetime_str}")
+                                continue
+                            
+                            # Crear registro con todos los campos necesarios
+                            record = {
+                                'symbol': symbol,
+                                'price': item.get('close', 0),  # Usamos close como precio actual
+                                'change': item.get('change', None),
+                                'change_percent': item.get('changePercent', None),
+                                'volume': item.get('volume', 0),
+                                'timestamp': record_timestamp,
+                                'datetime': datetime_str,
+                                'data_type': data_type,
+                                'open': item.get('open', 0),
+                                'high': item.get('high', 0),
+                                'low': item.get('low', 0),
+                                'close': item.get('close', 0),
+                                'market_cap': None  # No disponible en datos históricos diarios
+                            }
+                            processed_data.append(record)
+                        except Exception as e:
+                            logger.error(f"Error processing daily data point for {symbol}: {e}")
+                    
+                    # Organizar datos por fecha ascendente (más antiguos primero)
+                    processed_data.sort(key=lambda x: x['timestamp'])
+                    
+                    logger.info(f"Successfully processed {len(processed_data)} NEW daily data points for {symbol}")
+                    return processed_data
+                else:
+                    logger.warning(f"Empty data or missing 'historical' key returned for {symbol} daily data")
+            else:
+                logger.error(f"Error fetching daily data for {symbol}: {response.status_code} - {response.text}")
+        
+        except Exception as e:
+            logger.error(f"Exception fetching daily data for {symbol}: {e}", exc_info=True)
+        
+        return []
+    
     def store_quote(self, quote):
         """Almacenar cotización en tiempo real en la BD y publicar en Kafka"""
         try:
@@ -404,13 +478,13 @@ class IngestionManager:
     def store_intraday_data(self, data):
         """Almacenar datos históricos intradía en lote"""
         if not data or len(data) == 0:
+            logger.warning("No data provided for storage.")
             return False
-        
+
         try:
-            # Inserción en lote para mejor rendimiento
             with self.db_engine.connect() as conn:
                 for record in data:
-                    # Usamos "ON CONFLICT DO NOTHING" para evitar errores de duplicados
+                    logger.debug(f"Attempting to insert record: {record}")
                     insert_query = text("""
                         INSERT INTO market_data (
                             symbol, price, change, change_percent, volume, timestamp, datetime, 
@@ -419,15 +493,15 @@ class IngestionManager:
                             :symbol, :price, :change, :change_percent, :volume, :timestamp, :datetime, 
                             :data_type, :open, :high, :low, :close, :market_cap
                         )
-                        ON CONFLICT ON CONSTRAINT market_data_symbol_type_datetime_unique DO NOTHING
+                        ON CONFLICT ON CONSTRAINT market_data_symbol_datetime_key DO NOTHING
                     """)
-                    
                     conn.execute(insert_query, record)
-            
+                    logger.info(f"Successfully inserted record for symbol: {record['symbol']} at {record['datetime']}")
+
             return True
-        
+
         except Exception as e:
-            logger.error(f"Error storing intraday data: {e}")
+            logger.error(f"Error storing intraday data: {e}", exc_info=True)
             return False
 
     def store_and_publish_realtime_data(self, data_point):
@@ -436,11 +510,12 @@ class IngestionManager:
         Esta función se usa específicamente para los datos de 5min en tiempo "casi real".
         """
         if not data_point:
+            logger.warning("No data point provided for storage.")
             return False
-        
+
         try:
-            # Primero, guardar en la base de datos con ON CONFLICT DO NOTHING
             with self.db_engine.connect() as conn:
+                logger.debug(f"Attempting to insert data point: {data_point}")
                 insert_query = text("""
                     INSERT INTO market_data (
                         symbol, price, change, change_percent, volume, timestamp, datetime, 
@@ -449,23 +524,19 @@ class IngestionManager:
                         :symbol, :price, :change, :change_percent, :volume, :timestamp, :datetime, 
                         :data_type, :open, :high, :low, :close, :market_cap
                     )
-                    ON CONFLICT ON CONSTRAINT market_data_symbol_type_datetime_unique DO NOTHING
+                    ON CONFLICT ON CONSTRAINT market_data_symbol_datetime_key DO NOTHING
                 """)
-                
                 conn.execute(insert_query, data_point)
-            
-            # Luego, publicar en Kafka (independientemente de si se guardó o no en BD)
+                logger.info(f"Successfully inserted realtime data point for symbol: {data_point['symbol']} at {data_point['datetime']}")
+
             if self.kafka_producer:
-                self.kafka_producer.send(INGESTION_TOPIC, data_point)
-                logger.info(f"Realtime 5min data point for {data_point['symbol']} at {data_point['datetime']} published to Kafka")
-                # --- NUEVO: Notificar a clientes WS --- 
-                asyncio.run_coroutine_threadsafe(notify_clients(json.dumps(data_point)), loop)
-                # --- FIN NUEVO ---
+                self.kafka_producer.send(REALTIME_TOPIC, data_point)
+                logger.info(f"Realtime data point for {data_point['symbol']} at {data_point['datetime']} published to Kafka")
                 return True
             else:
                 logger.error("Cannot publish to Kafka: producer not available")
                 return False
-            
+
         except Exception as e:
             logger.error(f"Error storing and publishing realtime data: {e}", exc_info=True)
             return False
@@ -538,11 +609,11 @@ def historical_ingestion_thread():
         
         for symbol in symbols:
             try:
-                # Procesamiento de intervalos históricos
+                # Procesamiento de intervalos históricos intradía
                 for interval, config in intraday_config.items():
                     max_days = config['max_days']
                     target_days = config['target_days']
-                        data_type = f"intraday_{interval}"
+                    data_type = f"intraday_{interval}"
                     
                     # Obtener la última fecha para este símbolo y tipo de datos
                     last_date = ingestion_manager.get_last_date_for_symbol_and_type(symbol, data_type)
@@ -566,17 +637,55 @@ def historical_ingestion_thread():
                         logger.info(f"Initial fetch for {symbol} {data_type} from {start_date}")
                     
                     data = ingestion_manager.fetch_intraday_data(
-                                symbol=symbol,
-                                interval=interval,
-                                start_date=start_date,
-                                end_date=end_date
-                            )
-                        
-                        if data and len(data) > 0:
-                            ingestion_manager.store_intraday_data(data)
+                        symbol=symbol,
+                        interval=interval,
+                        start_date=start_date,
+                        end_date=end_date
+                    )
+                    
+                    if data and len(data) > 0:
+                        ingestion_manager.store_intraday_data(data)
                         logger.info(f"Stored {len(data)} {interval} data points for {symbol}")
                 
-                time.sleep(1)  # Pequeña pausa entre símbolos
+                # Procesamiento de datos diarios con historial de 4 años
+                data_type_daily = "daily"
+                years_of_history = 4
+                max_days_daily = 365 * years_of_history
+                
+                # Obtener la última fecha para datos diarios
+                last_date_daily = ingestion_manager.get_last_date_for_symbol_and_type(symbol, data_type_daily)
+                end_date_daily = datetime.now() - timedelta(days=1)  # Hasta ayer
+                
+                if last_date_daily:
+                    # Si tenemos datos diarios, continuar desde el último día + 1
+                    start_date_daily = last_date_daily + timedelta(days=1)
+                    logger.info(f"Incremental fetch for {symbol} daily data from {start_date_daily}")
+                    
+                    # Si ya estamos actualizados, no hacer nada
+                    if start_date_daily > end_date_daily:
+                        logger.info(f"No new daily data needed for {symbol}, already up to date")
+                        continue
+                else:
+                    # Si no tenemos datos diarios, obtener 4 años de historial
+                    start_date_daily = end_date_daily - timedelta(days=max_days_daily)
+                    logger.info(f"Initial fetch for {symbol} daily data with {years_of_history} years of history from {start_date_daily}")
+                
+                # Obtener datos diarios
+                daily_data = ingestion_manager.fetch_daily_data(
+                    symbol=symbol,
+                    start_date=start_date_daily,
+                    end_date=end_date_daily
+                )
+                
+                # Almacenar datos diarios
+                if daily_data and len(daily_data) > 0:
+                    ingestion_manager.store_intraday_data(daily_data)  # Reutilizamos la misma función para guardar
+                    logger.info(f"Stored {len(daily_data)} daily data points for {symbol}")
+                else:
+                    logger.warning(f"No daily data points retrieved for {symbol}")
+                
+                # Pequeña pausa entre símbolos para no saturar la API
+                time.sleep(1)
             except Exception as e:
                 logger.error(f"Error processing historical data for {symbol}: {e}", exc_info=True)
         

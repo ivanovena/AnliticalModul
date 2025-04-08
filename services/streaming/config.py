@@ -5,15 +5,14 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Kafka configuration
-KAFKA_HOST = os.getenv('KAFKA_HOST', 'kafka')
-KAFKA_PORT = os.getenv('KAFKA_PORT', '9092')
-KAFKA_BROKER = f"{KAFKA_HOST}:{KAFKA_PORT}"
-INGESTION_TOPIC = os.getenv('INGESTION_TOPIC', 'ingestion_events')
-STREAMING_TOPIC = os.getenv('STREAMING_TOPIC', 'streaming_events')
+KAFKA_BROKER = os.environ.get('KAFKA_BROKER', 'kafka:9092')
+INGESTION_TOPIC = os.environ.get('INGESTION_TOPIC', 'ingestion_events')
+REALTIME_TOPIC = os.environ.get('REALTIME_TOPIC', 'realtime_events') # Nuevo topic para datos en tiempo real
+STREAMING_TOPIC = os.environ.get('STREAMING_TOPIC', 'streaming_events')
 
-# API configuration
-FMP_API_KEY = os.getenv('FMP_API_KEY', 'h5JPnHPAdjxBAXAGwTOL3Acs3W5zaByx')
-FMP_BASE_URL = os.getenv('FMP_BASE_URL', 'https://financialmodelingprep.com/api/v3')
+# API Configuration
+FMP_API_KEY = os.environ.get('FMP_API_KEY', 'h5JPnHPAdjxBAXAGwTOL3Acs3W5zaByx')
+FMP_BASE_URL = os.environ.get('FMP_BASE_URL', 'https://financialmodelingprep.com/api/v3')
 
 # Logging configuration
 LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')

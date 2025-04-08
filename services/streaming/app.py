@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 from kafka import KafkaConsumer, KafkaProducer
 from kafka.errors import KafkaError
 from river import linear_model, preprocessing, feature_extraction, ensemble, compose, metrics, stats
-from config import KAFKA_BROKER, INGESTION_TOPIC, STREAMING_TOPIC, FMP_API_KEY, FMP_BASE_URL
+from config import KAFKA_BROKER, REALTIME_TOPIC, STREAMING_TOPIC, FMP_API_KEY, FMP_BASE_URL
 from flask import Flask, jsonify
 import threading
 import asyncio
@@ -213,14 +213,14 @@ logger = logging.getLogger("StreamingService")
 # Inicialización de Kafka Consumer y Producer
 try:
     consumer = KafkaConsumer(
-        INGESTION_TOPIC,
+        REALTIME_TOPIC,  # Cambiado de INGESTION_TOPIC a REALTIME_TOPIC
         bootstrap_servers=[KAFKA_BROKER],
         auto_offset_reset='latest',
         enable_auto_commit=True,
         group_id='streaming_service',
         value_deserializer=lambda m: json.loads(m.decode('utf-8'))
     )
-    logger.info(f"Kafka consumer inicializado. Suscrito a {INGESTION_TOPIC}")
+    logger.info(f"Kafka consumer inicializado. Suscrito a {REALTIME_TOPIC}")
     
     producer = KafkaProducer(
         bootstrap_servers=[KAFKA_BROKER],
@@ -694,6 +694,12 @@ if __name__ == "__main__":
                 health_metrics['ultimo_evento'] = datetime.now().isoformat() # Update health metric
 
                 if event:
+                    # NUEVO: Filtrar por tipo de datos, solo procesar datos en tiempo real
+                    data_type = event.get('data_type', '')
+                    if data_type not in ['realtime_5min', 'real_time']:
+                        logger.debug(f"Ignorando datos no en tiempo real: {data_type} para {event.get('symbol', 'unknown')}")
+                        continue
+                    
                     logger.debug(f"Mensaje recibido de Kafka: {event}")
                     prediction_event = process_streaming_event(event)
 
