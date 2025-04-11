@@ -95,7 +95,7 @@ services:
       - postgres
     volumes:
       - ./services/batch:/app
-      - models_data:/models  # Cambiado a /models para coincidir con la configuración del Dockerfile
+      - ./services/batch/models:/models  # Mapeado a la carpeta models que ya existe
     ports:
       - "8003:8003"  # API del servicio batch
       - "8084:8080"  # Puerto para el dashboard web (cambiado para evitar conflicto con ingestion)
@@ -184,8 +184,11 @@ services:
       - DB_URI=postgresql://market_admin:postgres@postgres:5432/market_data
       - INGESTION_SERVICE_URL=http://ingestion:8080
       - STREAMING_SERVICE_URL=http://streaming:8090
+      - OLLAMA_URL=http://host.docker.internal:11434
     networks:
       - trading_network
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
   # SERVICIO REDIS PARA CACHÉ
   redis:

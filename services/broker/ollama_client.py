@@ -83,7 +83,32 @@ class OllamaClient:
                     response = self.session.post(url, json=data, timeout=self.timeout)
                 
                 if response.status_code == 200:
-                    return response.json()
+                    try:
+                        # Intentar decodificar como JSON
+                        return response.json()
+                    except json.JSONDecodeError as je:
+                        # Si falla, podría ser una respuesta de streaming
+                        # Tomamos solo la primera línea que debería ser un JSON válido
+                        lines = response.text.strip().split('\n')
+                        if lines:
+                            try:
+                                # Solo procesar la primera línea como JSON
+                                return json.loads(lines[0])
+                            except json.JSONDecodeError:
+                                # Intentar parsear línea por línea
+                                for line in lines:
+                                    try:
+                                        if line.strip():
+                                            return json.loads(line.strip())
+                                    except:
+                                        pass
+                                
+                                logger.error(f"Error decodificando respuesta JSON: {je}")
+                                return {"error": f"Error decodificando respuesta JSON: {str(je)}", 
+                                        "raw_response": response.text[:200]}
+                        else:
+                            logger.error(f"Respuesta vacía de API {endpoint}")
+                            return {"error": "Respuesta vacía", "raw_response": ""}
                 else:
                     logger.warning(f"Error en llamada a API {endpoint}: {response.status_code}, {response.text}")
                     
@@ -211,7 +236,9 @@ def get_ollama_client() -> OllamaClient:
     Returns:
         Cliente de Ollama
     """
-    ollama_url = os.getenv("OLLAMA_URL", "http://localhost:11434")
+    # Usar la variable de entorno OLLAMA_URL o el valor predeterminado
+    ollama_url = os.getenv("OLLAMA_URL", "http://host.docker.internal:11434")
+    logger.info(f"Conectando a Ollama en: {ollama_url}")
     return OllamaClient(base_url=ollama_url)
 
 # Si se ejecuta como script principal, mostrar modelos disponibles

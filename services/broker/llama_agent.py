@@ -183,123 +183,117 @@ class LlamaAgent:
             self.model_coordinator = None
         
         try:
-            # Inicializar modelo Llama optimizado para 64GB RAM (M2 Ultra)
+            # Inicializar modelo usando prioritariamente Ollama
             if LLAMA_AVAILABLE:
-                # Configuración para usar DeepSeek-Coder 33B en M2 Ultra con 64GB
-                deepseek_path = os.path.join(os.path.dirname(self.model_path), "deepseek-coder-33b-instruct.gguf")
-                
-                # Verificar si existe el modelo localmente
-                if os.path.exists("/Users/ivangodo/.ollama/models/blobs"):
-                    logger.info("Detectado Ollama. Intentando usar modelo DeepSeek-Coder 33B local")
+                # Priorizar uso de modelos disponibles en Ollama
+                try:
+                    # Importar nuestro cliente de Ollama personalizado
+                    from ollama_client import get_ollama_client
                     
-                    # Configuración para usar Ollama
-                    try:
-                        # Importar nuestro cliente de Ollama personalizado
-                        from ollama_client import get_ollama_client
-                        
-                        # Obtener instancia del cliente
-                        ollama_client = get_ollama_client()
-                        
-                        # Función para enviar consultas a Ollama
-                        def generate_with_ollama(prompt, max_tokens=512, model="deepseek-coder:33b"):
-                            try:
-                                options = {
-                                    "num_predict": max_tokens,
-                                    "temperature": 0.7
-                                }
-                                
-                                # Sistema prompt mejorado para un análisis financiero más completo
-                                system_prompt = (
-                                    "Eres un asistente financiero especializado en trading algorítmico con las siguientes responsabilidades:\n\n"
-                                    "1. ANÁLISIS DE MERCADO: Proporciona análisis técnico y fundamental detallado basado en datos actuales.\n"
-                                    "2. ESTRATEGIAS DE INVERSIÓN: Ofrece recomendaciones concretas (COMPRAR/VENDER/MANTENER) con niveles de confianza.\n"
-                                    "3. INTERPRETACIÓN DE MODELOS: Explica predicciones de modelos de ML en términos comprensibles.\n"
-                                    "4. GESTIÓN DE RIESGO: Incluye siempre evaluaciones de riesgo y horizontes temporales en tus recomendaciones.\n"
-                                    "5. EDUCACIÓN FINANCIERA: Explica conceptos complejos cuando sea relevante.\n\n"
-                                    "LIMITACIONES IMPORTANTES:\n"
-                                    "- Indica siempre el nivel de incertidumbre en tus análisis. Nunca garantices resultados específicos.\n"
-                                    "- Cuando falten datos, sé transparente sobre las limitaciones de tu análisis.\n"
-                                    "- Aclara que tus recomendaciones son educativas, no asesoramiento financiero regulado.\n"
-                                    "- Si una pregunta está fuera del ámbito financiero o de trading, redirige amablemente al usuario.\n\n"
-                                    "FORMATO DE RESPUESTAS:\n"
-                                    "- Para análisis de símbolos: Estructura con Precio Actual, Predicción, Confianza, Recomendación y Razonamiento.\n"
-                                    "- Para estrategias: Incluye Acción, Horizonte Temporal, Nivel de Riesgo y Factores Clave.\n"
-                                    "- Para métricas: Presenta datos con formato claro y explica su significado.\n\n"
-                                    "Tu objetivo es ayudar a los usuarios a tomar decisiones financieras informadas basadas en datos y análisis algorítmico."
+                    # Obtener instancia del cliente
+                    ollama_client = get_ollama_client()
+                    
+                    # Lista de modelos a intentar usar en orden de preferencia
+                    ollama_models = ["deepseek-coder:33b", "phi4:latest", "gemma3:27b", "codellama:13b", "deepseek-coder:6.7b"]
+                    
+                    # Función para enviar consultas a Ollama
+                    def generate_with_ollama(prompt, max_tokens=512, model="deepseek-coder:33b"):
+                        try:
+                            options = {
+                                "num_predict": max_tokens,
+                                "temperature": 0.7
+                            }
+                            
+                            # Sistema prompt mejorado para un análisis financiero más completo
+                            system_prompt = (
+                                "Eres un asistente financiero especializado en trading algorítmico con las siguientes responsabilidades:\n\n"
+                                "1. ANÁLISIS DE MERCADO: Proporciona análisis técnico y fundamental detallado basado en datos actuales.\n"
+                                "2. ESTRATEGIAS DE INVERSIÓN: Ofrece recomendaciones concretas (COMPRAR/VENDER/MANTENER) con niveles de confianza.\n"
+                                "3. INTERPRETACIÓN DE MODELOS: Explica predicciones de modelos de ML en términos comprensibles.\n"
+                                "4. GESTIÓN DE RIESGO: Incluye siempre evaluaciones de riesgo y horizontes temporales en tus recomendaciones.\n"
+                                "5. EDUCACIÓN FINANCIERA: Explica conceptos complejos cuando sea relevante.\n\n"
+                                "LIMITACIONES IMPORTANTES:\n"
+                                "- Indica siempre el nivel de incertidumbre en tus análisis. Nunca garantices resultados específicos.\n"
+                                "- Cuando falten datos, sé transparente sobre las limitaciones de tu análisis.\n"
+                                "- Aclara que tus recomendaciones son educativas, no asesoramiento financiero regulado.\n"
+                                "- Si una pregunta está fuera del ámbito financiero o de trading, redirige amablemente al usuario.\n\n"
+                                "FORMATO DE RESPUESTAS:\n"
+                                "- Para análisis de símbolos: Estructura con Precio Actual, Predicción, Confianza, Recomendación y Razonamiento.\n"
+                                "- Para estrategias: Incluye Acción, Horizonte Temporal, Nivel de Riesgo y Factores Clave.\n"
+                                "- Para métricas: Presenta datos con formato claro y explica su significado.\n\n"
+                                "Tu objetivo es ayudar a los usuarios a tomar decisiones financieras informadas basadas en datos y análisis algorítmico."
+                            )
+                            
+                            # Usar chat completion para modelos nuevos
+                            if model in ["phi4:latest", "gemma3:27b"]:
+                                messages = [
+                                    {"role": "system", "content": system_prompt},
+                                    {"role": "user", "content": prompt}
+                                ]
+                                response = ollama_client.chat_completion(
+                                    model=model, 
+                                    messages=messages,
+                                    options=options
                                 )
-                                
-                                # Usar chat completion para modelos nuevos
-                                if model in ["phi4:latest", "gemma3:27b"]:
-                                    messages = [
-                                        {"role": "system", "content": system_prompt},
-                                        {"role": "user", "content": prompt}
-                                    ]
-                                    response = ollama_client.chat_completion(
-                                        model=model, 
-                                        messages=messages,
-                                        options=options
-                                    )
-                                    return {"response": response.get("message", {}).get("content", "")}
-                                else:
-                                    # Usar generate para otros modelos
-                                    response = ollama_client.generate(
-                                        model=model,
-                                        prompt=prompt,
-                                        system=system_prompt,
-                                        options=options
-                                    )
-                                    return response
-                            except Exception as e:
-                                logger.error(f"Error con Ollama: {e}")
-                                return {"response": "Error generando respuesta con el modelo."}
-                        
-                        # Probar la conexión
-                        test_response = generate_with_ollama("Hello, world", max_tokens=10)
-                        if test_response and "response" in test_response:
-                            logger.info("Conexión con Ollama establecida correctamente")
+                                return {"response": response.get("message", {}).get("content", "")}
+                            else:
+                                # Usar generate para otros modelos
+                                response = ollama_client.generate(
+                                    model=model,
+                                    prompt=prompt,
+                                    system=system_prompt,
+                                    options=options
+                                )
+                                return response
+                        except Exception as e:
+                            logger.error(f"Error con Ollama: {e}")
+                            return {"response": "Error generando respuesta con el modelo."}
+                    
+                    # Probar cada modelo en orden de preferencia
+                    model_found = False
+                    for model_name in ollama_models:
+                        try:
+                            logger.info(f"Intentando cargar modelo {model_name} desde Ollama...")
+                            test_response = generate_with_ollama("Hola, ¿cómo estás?", max_tokens=10, model=model_name)
                             
-                            # Crear un wrapper compatible con la interfaz esperada
-                            class OllamaWrapper:
-                                def __init__(self, model_name="deepseek-coder:33b"):
-                                    self.model_name = model_name
+                            if test_response and "response" in test_response:
+                                # Modelo encontrado y funcional
+                                logger.info(f"Modelo {model_name} cargado correctamente desde Ollama")
                                 
-                                def __call__(self, prompt, max_tokens=512, stop=None, temperature=0.7, repeat_penalty=1.1):
-                                    response = generate_with_ollama(
-                                        prompt=prompt, 
-                                        max_tokens=max_tokens,
-                                        model=self.model_name
-                                    )
-                                    # Formatear respuesta para compatibilidad
-                                    return {
-                                        "choices": [
-                                            {
-                                                "text": response.get("response", "")
-                                            }
-                                        ]
-                                    }
-                            
-                            # Usar el wrapper como modelo
-                            self.model = OllamaWrapper("deepseek-coder:33b")
-                            logger.info("Modelo DeepSeek-Coder 33B cargado desde Ollama")
-                        else:
-                            logger.warning("No se pudo conectar con Ollama")
-                    except ImportError as e:
-                        logger.warning(f"No se pudo importar la librería de cliente de Ollama: {e}. Intentando cargar modelo directo.")
+                                # Crear un wrapper compatible con la interfaz esperada
+                                class OllamaWrapper:
+                                    def __init__(self, model_name):
+                                        self.model_name = model_name
+                                    
+                                    def __call__(self, prompt, max_tokens=512, stop=None, temperature=0.7, repeat_penalty=1.1):
+                                        response = generate_with_ollama(
+                                            prompt=prompt, 
+                                            max_tokens=max_tokens,
+                                            model=self.model_name
+                                        )
+                                        # Formatear respuesta para compatibilidad
+                                        return {
+                                            "choices": [
+                                                {
+                                                    "text": response.get("response", "")
+                                                }
+                                            ]
+                                        }
+                                
+                                # Usar el wrapper como modelo
+                                self.model = OllamaWrapper(model_name)
+                                model_found = True
+                                break
+                        except Exception as e:
+                            logger.warning(f"Error al intentar usar modelo {model_name}: {e}")
+                    
+                    if not model_found:
+                        logger.warning("No se pudo cargar ningún modelo desde Ollama")
+                except ImportError as e:
+                    logger.warning(f"No se pudo importar la librería de cliente de Ollama: {e}. Intentando cargar modelo directo.")
                 
                 # Si no se pudo usar Ollama, intentar cargar el modelo directamente
-                if self.model is None and os.path.exists(deepseek_path):
-                    # Cargar DeepSeek-Coder 33B directamente con llamacpp
-                    logger.info(f"Cargando modelo DeepSeek-Coder 33B: {deepseek_path}")
-                    self.model = Llama(
-                        model_path=deepseek_path,
-                        n_ctx=4096,        # Contexto mayor para análisis financieros complejos
-                        n_batch=128,       # Mayor batch para M2 Ultra
-                        n_gpu_layers=-1,   # Usar todas las capas en GPU
-                        use_mlock=True,    # Bloquear en memoria con 64GB disponibles
-                        seed=42            # Reproducibilidad
-                    )
-                    logger.info(f"Modelo DeepSeek-Coder 33B cargado correctamente")
-                elif self.model is None and os.path.exists(self.model_path):
+                if self.model is None and os.path.exists(self.model_path):
                     # Si es un archivo local GGUF
                     logger.info(f"Cargando modelo local: {self.model_path}")
                     self.model = Llama(
@@ -311,15 +305,6 @@ class LlamaAgent:
                         seed=42            # Reproducibilidad
                     )
                     logger.info(f"Modelo Llama cargado desde {self.model_path}")
-                elif self.model is None:
-                    # Intentar con otro modelo disponible localmente
-                    try:
-                        logger.info("Intentando usar modelo Phi-4 como alternativa")
-                        self.model = OllamaWrapper("phi4:latest")
-                        logger.info("Modelo Phi-4 cargado desde Ollama")
-                    except Exception as e:
-                        logger.error(f"Error cargando modelo alternativo: {e}")
-                        self.model = None
             else:
                 logger.warning("llama-cpp-python no está disponible. Usando respuestas predefinidas.")
                 self.model = None
@@ -667,12 +652,27 @@ class LlamaAgent:
         # Obtener contexto adicional (datos de mercado y predicciones)
         market_context = self._get_market_context()
         
-        # Sistema prompt
+        # Sistema prompt mejorado para análisis financiero más completo
         system_prompt = (
-            "Eres un asistente financiero especializado en trading algorítmico. "
-            "Proporciona análisis de mercado, estrategias de inversión y recomendaciones "
-            "basadas en modelos de machine learning. Tu objetivo es ayudar a los usuarios "
-            "a tomar decisiones financieras informadas y efectivas."
+            "Eres un asistente financiero especializado en trading algorítmico con las siguientes responsabilidades:\n\n"
+            "1. ANÁLISIS DE MERCADO: Proporciona análisis técnico y fundamental detallado basado en datos actuales.\n"
+            "2. ESTRATEGIAS DE INVERSIÓN: Ofrece recomendaciones concretas (COMPRAR/VENDER/MANTENER) con niveles de confianza.\n"
+            "3. INTERPRETACIÓN DE MODELOS: Explica predicciones de modelos de ML en términos comprensibles.\n"
+            "4. GESTIÓN DE RIESGO: Incluye siempre evaluaciones de riesgo y horizontes temporales en tus recomendaciones.\n"
+            "5. EDUCACIÓN FINANCIERA: Explica conceptos complejos cuando sea relevante.\n\n"
+            "LIMITACIONES IMPORTANTES:\n"
+            "- Indica siempre el nivel de incertidumbre en tus análisis. Nunca garantices resultados específicos.\n"
+            "- Cuando falten datos, sé transparente sobre las limitaciones de tu análisis.\n"
+            "- Aclara que tus recomendaciones son educativas, no asesoramiento financiero regulado.\n"
+            "- Si una pregunta está fuera del ámbito financiero o de trading, redirige amablemente al usuario.\n\n"
+            "FORMATO DE RESPUESTAS:\n"
+            "- Para análisis de símbolos: Estructura con Precio Actual, Predicción, Confianza, Recomendación y Razonamiento.\n"
+            "- Para estrategias: Incluye Acción, Horizonte Temporal, Nivel de Riesgo y Factores Clave.\n"
+            "- Para métricas: Presenta datos con formato claro y explica su significado.\n\n"
+            "DATOS HISTÓRICOS DE ÉXITO:\n"
+            "- Con tus análisis previos has ayudado a usuarios a entender tendencias de mercado y tomar decisiones más informadas.\n"
+            "- Las estrategias que mejor han funcionado combinan análisis fundamental y técnico, con especial atención a la gestión del riesgo.\n\n"
+            "Tu objetivo es ayudar a los usuarios a tomar decisiones financieras informadas basadas en datos y análisis algorítmico."
         )
         
         # Construir historial de conversación
@@ -686,11 +686,33 @@ class LlamaAgent:
             else:
                 conversation_history += f"<|assistant|>\n{content}\n"
         
+        # Incluir ejemplos de conversaciones exitosas previas si hay disponibles (few-shot learning)
+        exemplary_context = ""
+        if hasattr(self, 'exemplary_conversations') and self.exemplary_conversations:
+            # Seleccionar una conversación ejemplar relevante (basada en similaridad con el mensaje actual)
+            # En una implementación completa, aquí se añadiría un algoritmo de similitud semántica
+            exemplary = self.exemplary_conversations[0] if self.exemplary_conversations else None
+            
+            if exemplary and exemplary.messages and len(exemplary.messages) >= 2:
+                # Tomar solo un par pregunta-respuesta de la conversación ejemplar
+                user_msg = next((msg for msg in exemplary.messages if msg["role"] == "user"), None)
+                assistant_msg = next((msg for msg in exemplary.messages if msg["role"] == "assistant"), None)
+                
+                if user_msg and assistant_msg:
+                    exemplary_context = (
+                        "Ejemplo de consulta similar:\n"
+                        f"Usuario: {user_msg['content']}\n"
+                        f"Respuesta: {assistant_msg['content']}\n\n"
+                    )
+        
         # Formato final del prompt
         prompt = f"{system_prompt}\n\n"
         
         if market_context:
             prompt += f"Información de mercado actual:\n{market_context}\n\n"
+        
+        if exemplary_context:
+            prompt += f"{exemplary_context}\n"
             
         if conversation_history:
             prompt += f"{conversation_history}\n"

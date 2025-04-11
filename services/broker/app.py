@@ -9,6 +9,7 @@ import os
 import atexit
 import random
 import asyncio
+import redis  # Agregamos la importación explícita de redis
 from datetime import datetime, timedelta
 from kafka import KafkaConsumer, KafkaProducer
 import requests
@@ -72,7 +73,14 @@ model_coordinator = llama_agent.model_coordinator if hasattr(llama_agent, 'model
 
 # Inicializar Redis para caché compartida
 try:
-    redis_client = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=0, decode_responses=True)
+    REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", "redis123")
+    redis_client = redis.Redis(
+        host=REDIS_HOST, 
+        port=REDIS_PORT, 
+        password=REDIS_PASSWORD,
+        db=0, 
+        decode_responses=True
+    )
     redis_client.ping()  # Verificar conexión
     logger.info(f"Redis inicializado correctamente en {REDIS_HOST}:{REDIS_PORT}")
 except Exception as e:
@@ -115,8 +123,15 @@ class DataClient:
         
         # Si no hay datos en caché, obtener del servicio de ingestion
         try:
+            # Añadir headers explícitamente
+            headers = {
+                "Accept": "application/json",
+                "User-Agent": "BrokerService/1.0",
+                "Connection": "keep-alive"
+            }
+            
             url = f"{self.ingestion_url}/market-data/{symbol}"
-            response = await run_in_threadpool(lambda: requests.get(url, timeout=5))
+            response = await run_in_threadpool(lambda: requests.get(url, headers=headers, timeout=5))
             
             if response.status_code == 200:
                 data = response.json()
@@ -138,7 +153,7 @@ class DataClient:
                 return await self.get_market_data_fmp(symbol)
                 
         except Exception as e:
-            logger.warning(f"Error obteniendo datos de ingestion para {symbol}: {e}")
+            logger.warning(f"Error obteniendo datos de mercado para {symbol} desde ingestion: {e}")
             # Intentar FMP como fallback
             return await self.get_market_data_fmp(symbol)
     
