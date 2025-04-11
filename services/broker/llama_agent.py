@@ -109,7 +109,7 @@ class ModelCache:
             if symbol not in self.predictions:
                 self.predictions[symbol] = []
             
-            # Agregar nueva predicción y mantener solo las 5 más recientes
+            # Agregar nueva predicción and mantener solo las 5 más recientes
             self.predictions[symbol].append(prediction)
             self.predictions[symbol] = self.predictions[symbol][-5:]
             self.last_update[symbol] = datetime.now()
@@ -150,14 +150,26 @@ class LlamaAgent:
         Inicializa el agente Llama
         
         Args:
-            model_path: Ruta al modelo Llama (GGUF) o nombre del modelo en HF
+            model_path: Ruta al modelo Llama (GGUF) or nombre del modelo en HF
         """
         self.conversations = {}  # Almacena el historial de conversaciones
         self.model = None
         self.model_path = model_path or os.getenv("LLAMA_MODEL_PATH", "models/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf")
-        self.cache = ModelCache()  # Caché para datos y predicciones
+        self.cache = ModelCache()  # Caché para datos and predicciones
         self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)  # Para operaciones asíncronas
         self.fmp_api_key = os.getenv("FMP_API_KEY", "h5JPnHPAdjxBAXAGwTOL3Acs3W5zaByx")
+        
+        # Nuevo: Sistema de aprendizaje y retroalimentación
+        self.feedback_store = self._load_feedback_store()
+        self.exemplary_conversations = self._load_exemplary_conversations()
+        self.learning_metrics = {
+            "total_conversations": 0,
+            "positive_feedback": 0,
+            "negative_feedback": 0,
+            "avg_conversation_length": 0,
+            "most_common_intents": {},
+            "last_updated": datetime.now().isoformat()
+        }
         
         logger.info(f"Inicializando LlamaAgent con modelo {self.model_path}")
         
@@ -171,62 +183,142 @@ class LlamaAgent:
             self.model_coordinator = None
         
         try:
-            # Inicializar modelo Llama optimizado para 16GB RAM
+            # Inicializar modelo Llama optimizado para 64GB RAM (M2 Ultra)
             if LLAMA_AVAILABLE:
-                # Buscar el modelo TinyLlama
-                tinyllama_path = os.path.join(os.path.dirname(self.model_path), "tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf")
-                if os.path.exists(tinyllama_path):
-                    # Si se encuentra TinyLlama, usarlo
-                    logger.info(f"Cargando modelo TinyLlama: {tinyllama_path}")
+                # Configuración para usar DeepSeek-Coder 33B en M2 Ultra con 64GB
+                deepseek_path = os.path.join(os.path.dirname(self.model_path), "deepseek-coder-33b-instruct.gguf")
+                
+                # Verificar si existe el modelo localmente
+                if os.path.exists("/Users/ivangodo/.ollama/models/blobs"):
+                    logger.info("Detectado Ollama. Intentando usar modelo DeepSeek-Coder 33B local")
+                    
+                    # Configuración para usar Ollama
+                    try:
+                        # Importar nuestro cliente de Ollama personalizado
+                        from ollama_client import get_ollama_client
+                        
+                        # Obtener instancia del cliente
+                        ollama_client = get_ollama_client()
+                        
+                        # Función para enviar consultas a Ollama
+                        def generate_with_ollama(prompt, max_tokens=512, model="deepseek-coder:33b"):
+                            try:
+                                options = {
+                                    "num_predict": max_tokens,
+                                    "temperature": 0.7
+                                }
+                                
+                                # Sistema prompt mejorado para un análisis financiero más completo
+                                system_prompt = (
+                                    "Eres un asistente financiero especializado en trading algorítmico con las siguientes responsabilidades:\n\n"
+                                    "1. ANÁLISIS DE MERCADO: Proporciona análisis técnico y fundamental detallado basado en datos actuales.\n"
+                                    "2. ESTRATEGIAS DE INVERSIÓN: Ofrece recomendaciones concretas (COMPRAR/VENDER/MANTENER) con niveles de confianza.\n"
+                                    "3. INTERPRETACIÓN DE MODELOS: Explica predicciones de modelos de ML en términos comprensibles.\n"
+                                    "4. GESTIÓN DE RIESGO: Incluye siempre evaluaciones de riesgo y horizontes temporales en tus recomendaciones.\n"
+                                    "5. EDUCACIÓN FINANCIERA: Explica conceptos complejos cuando sea relevante.\n\n"
+                                    "LIMITACIONES IMPORTANTES:\n"
+                                    "- Indica siempre el nivel de incertidumbre en tus análisis. Nunca garantices resultados específicos.\n"
+                                    "- Cuando falten datos, sé transparente sobre las limitaciones de tu análisis.\n"
+                                    "- Aclara que tus recomendaciones son educativas, no asesoramiento financiero regulado.\n"
+                                    "- Si una pregunta está fuera del ámbito financiero o de trading, redirige amablemente al usuario.\n\n"
+                                    "FORMATO DE RESPUESTAS:\n"
+                                    "- Para análisis de símbolos: Estructura con Precio Actual, Predicción, Confianza, Recomendación y Razonamiento.\n"
+                                    "- Para estrategias: Incluye Acción, Horizonte Temporal, Nivel de Riesgo y Factores Clave.\n"
+                                    "- Para métricas: Presenta datos con formato claro y explica su significado.\n\n"
+                                    "Tu objetivo es ayudar a los usuarios a tomar decisiones financieras informadas basadas en datos y análisis algorítmico."
+                                )
+                                
+                                # Usar chat completion para modelos nuevos
+                                if model in ["phi4:latest", "gemma3:27b"]:
+                                    messages = [
+                                        {"role": "system", "content": system_prompt},
+                                        {"role": "user", "content": prompt}
+                                    ]
+                                    response = ollama_client.chat_completion(
+                                        model=model, 
+                                        messages=messages,
+                                        options=options
+                                    )
+                                    return {"response": response.get("message", {}).get("content", "")}
+                                else:
+                                    # Usar generate para otros modelos
+                                    response = ollama_client.generate(
+                                        model=model,
+                                        prompt=prompt,
+                                        system=system_prompt,
+                                        options=options
+                                    )
+                                    return response
+                            except Exception as e:
+                                logger.error(f"Error con Ollama: {e}")
+                                return {"response": "Error generando respuesta con el modelo."}
+                        
+                        # Probar la conexión
+                        test_response = generate_with_ollama("Hello, world", max_tokens=10)
+                        if test_response and "response" in test_response:
+                            logger.info("Conexión con Ollama establecida correctamente")
+                            
+                            # Crear un wrapper compatible con la interfaz esperada
+                            class OllamaWrapper:
+                                def __init__(self, model_name="deepseek-coder:33b"):
+                                    self.model_name = model_name
+                                
+                                def __call__(self, prompt, max_tokens=512, stop=None, temperature=0.7, repeat_penalty=1.1):
+                                    response = generate_with_ollama(
+                                        prompt=prompt, 
+                                        max_tokens=max_tokens,
+                                        model=self.model_name
+                                    )
+                                    # Formatear respuesta para compatibilidad
+                                    return {
+                                        "choices": [
+                                            {
+                                                "text": response.get("response", "")
+                                            }
+                                        ]
+                                    }
+                            
+                            # Usar el wrapper como modelo
+                            self.model = OllamaWrapper("deepseek-coder:33b")
+                            logger.info("Modelo DeepSeek-Coder 33B cargado desde Ollama")
+                        else:
+                            logger.warning("No se pudo conectar con Ollama")
+                    except ImportError as e:
+                        logger.warning(f"No se pudo importar la librería de cliente de Ollama: {e}. Intentando cargar modelo directo.")
+                
+                # Si no se pudo usar Ollama, intentar cargar el modelo directamente
+                if self.model is None and os.path.exists(deepseek_path):
+                    # Cargar DeepSeek-Coder 33B directamente con llamacpp
+                    logger.info(f"Cargando modelo DeepSeek-Coder 33B: {deepseek_path}")
                     self.model = Llama(
-                        model_path=tinyllama_path,
-                        n_ctx=2048,         # Contexto reducido para ahorrar memoria
-                        n_batch=8,          # Batch pequeño para ahorrar memoria
-                        n_gpu_layers=20,    # Usar GPU para algunas capas
-                        use_mlock=False,    # No bloquear en memoria
-                        seed=42             # Reproducibilidad
+                        model_path=deepseek_path,
+                        n_ctx=4096,        # Contexto mayor para análisis financieros complejos
+                        n_batch=128,       # Mayor batch para M2 Ultra
+                        n_gpu_layers=-1,   # Usar todas las capas en GPU
+                        use_mlock=True,    # Bloquear en memoria con 64GB disponibles
+                        seed=42            # Reproducibilidad
                     )
-                    logger.info(f"Modelo TinyLlama cargado correctamente")
-                elif os.path.exists(self.model_path):
+                    logger.info(f"Modelo DeepSeek-Coder 33B cargado correctamente")
+                elif self.model is None and os.path.exists(self.model_path):
                     # Si es un archivo local GGUF
                     logger.info(f"Cargando modelo local: {self.model_path}")
                     self.model = Llama(
                         model_path=self.model_path,
-                        n_ctx=2048,         # Contexto reducido para ahorrar memoria
-                        n_batch=8,          # Batch pequeño para ahorrar memoria
-                        n_gpu_layers=20,    # Usar GPU para algunas capas
-                        use_mlock=False,    # No bloquear en memoria
-                        seed=42             # Reproducibilidad
+                        n_ctx=4096,        # Contexto mayor
+                        n_batch=64,        # Batch moderado
+                        n_gpu_layers=-1,   # Usar todas las capas en GPU
+                        use_mlock=True,    # Bloquear en memoria
+                        seed=42            # Reproducibilidad
                     )
                     logger.info(f"Modelo Llama cargado desde {self.model_path}")
-                else:
-                    # Si es un nombre de modelo, intentar descargarlo
-                    from huggingface_hub import hf_hub_download
-                    
-                    # Buscar un modelo GGUF más pequeño para 16GB RAM
+                elif self.model is None:
+                    # Intentar con otro modelo disponible localmente
                     try:
-                        logger.info("Descargando modelo desde Hugging Face Hub")
-                        model_dir = os.path.dirname(self.model_path)
-                        os.makedirs(model_dir, exist_ok=True)
-                        
-                        model_file = hf_hub_download(
-                            repo_id="meta-llama/Llama-3.2-1B-Instruct-GGUF", 
-                            filename="meta-llama-3.2-1b-instruct.Q4_K_M.gguf",
-                            local_dir=model_dir,
-                            local_dir_use_symlinks=False
-                        )
-                        
-                        self.model = Llama(
-                            model_path=model_file,
-                            n_ctx=2048,
-                            n_batch=8,
-                            n_gpu_layers=20,
-                            use_mlock=False,
-                            seed=42
-                        )
-                        logger.info(f"Modelo Llama descargado y cargado: {model_file}")
+                        logger.info("Intentando usar modelo Phi-4 como alternativa")
+                        self.model = OllamaWrapper("phi4:latest")
+                        logger.info("Modelo Phi-4 cargado desde Ollama")
                     except Exception as e:
-                        logger.error(f"Error descargando modelo: {e}")
+                        logger.error(f"Error cargando modelo alternativo: {e}")
                         self.model = None
             else:
                 logger.warning("llama-cpp-python no está disponible. Usando respuestas predefinidas.")
@@ -245,6 +337,76 @@ class LlamaAgent:
         
         # Cargar estrategias iniciales
         self._load_initial_strategies()
+
+    def _load_feedback_store(self) -> Dict[str, Any]:
+        """Carga almacén de retroalimentación desde un archivo"""
+        try:
+            if os.path.exists("feedback_store.pkl"):
+                with open("feedback_store.pkl", "rb") as f:
+                    return pickle.load(f)
+            return {"responses": {}, "metrics": {}}
+        except Exception as e:
+            logger.error(f"Error cargando almacén de retroalimentación: {e}")
+            return {"responses": {}, "metrics": {}}
+    
+    def _load_exemplary_conversations(self) -> List[Dict[str, Any]]:
+        """Carga conversaciones ejemplares para entrenamiento futuro"""
+        try:
+            if os.path.exists("exemplary_conversations.pkl"):
+                with open("exemplary_conversations.pkl", "rb") as f:
+                    return pickle.load(f)
+            return []
+        except Exception as e:
+            logger.error(f"Error cargando conversaciones ejemplares: {e}")
+            return []
+    
+    def _save_feedback_store(self):
+        """Guarda almacén de retroalimentación en un archivo"""
+        try:
+            with open("feedback_store.pkl", "wb") as f:
+                pickle.dump(self.feedback_store, f)
+            logger.info("Almacén de retroalimentación guardado")
+        except Exception as e:
+            logger.error(f"Error guardando almacén de retroalimentación: {e}")
+    
+    def _save_exemplary_conversations(self):
+        """Guarda conversaciones ejemplares en un archivo"""
+        try:
+            with open("exemplary_conversations.pkl", "wb") as f:
+                pickle.dump(self.exemplary_conversations, f)
+            logger.info("Conversaciones ejemplares guardadas")
+        except Exception as e:
+            logger.error(f"Error guardando conversaciones ejemplares: {e}")
+        
+    def add_feedback(self, conversation_id: str, response_id: str, feedback: Dict[str, Any]):
+        """
+        Añade retroalimentación para una respuesta específica
+        
+        Args:
+            conversation_id: ID de la conversación
+            response_id: ID de la respuesta (timestamp)
+            feedback: Diccionario con retroalimentación (rating, comments, etc.)
+        """
+        if conversation_id not in self.feedback_store["responses"]:
+            self.feedback_store["responses"][conversation_id] = {}
+        
+        self.feedback_store["responses"][conversation_id][response_id] = feedback
+        
+        # Actualizar métricas
+        rating = feedback.get("rating", 0)
+        if rating > 3:  # Escala 1-5
+            self.learning_metrics["positive_feedback"] += 1
+        else:
+            self.learning_metrics["negative_feedback"] += 1
+        
+        # Si es muy positivo, considerar como conversación ejemplar
+        if rating >= 4.5 and conversation_id in self.conversations:
+            conversation = self.conversations[conversation_id]
+            if conversation not in self.exemplary_conversations:
+                self.exemplary_conversations.append(conversation)
+                self._save_exemplary_conversations()
+        
+        self._save_feedback_store()
 
     def _load_initial_strategies(self):
         """Carga estrategias iniciales para símbolos comunes"""
@@ -343,7 +505,7 @@ class LlamaAgent:
                     strategy = self._generate_symbol_strategy(symbol)
                     self.cache.update_strategy(symbol, strategy)
                 
-                logger.info(f"Predicciones y estrategias actualizadas para {len(symbol_managers)} símbolos")
+                logger.info(f"Predicciones and estrategias actualizadas para {len(symbol_managers)} símbolos")
             else:
                 # Si no hay coordinador, generar predicciones simuladas
                 symbols = self.cache.get_all_symbols()
@@ -367,7 +529,7 @@ class LlamaAgent:
         Returns:
             Respuesta generada y ID de conversación
         """
-        # Obtener o crear ID de conversación
+        # Obtener or crear ID de conversación
         conversation_id = chat_message.conversation_id
         if not conversation_id:
             conversation_id = str(uuid.uuid4())
@@ -417,10 +579,10 @@ class LlamaAgent:
             response=response,
             conversation_id=conversation_id
         )
-    
+        
     def _generate_response(self, message: str, conversation_id: str) -> str:
         """
-        Genera una respuesta utilizando el modelo Llama o reglas predefinidas
+        Genera una respuesta utilizando el modelo Llama or reglas predefinidas
         
         Args:
             message: Mensaje del usuario
@@ -429,7 +591,7 @@ class LlamaAgent:
         Returns:
             Respuesta generada
         """
-        # Si el mensaje es vacío o muy corto
+        # Si el mensaje es vacío or muy corto
         if not message or len(message) < 2:
             return "Por favor, envía un mensaje más detallado para poder ayudarte."
         
@@ -461,872 +623,613 @@ class LlamaAgent:
                 conversation = self.conversations[conversation_id]
                 prompt = self._build_llama_prompt(conversation, message)
                 
-                # Generar respuesta con el modelo TinyLlama
+                # Generar respuesta con el modelo
                 response = self.model(
                     prompt,
                     max_tokens=512,
-                    stop=["<|user|>", "<|endoftext|>", "<|system|>"],
+                    stop=["<|user|>", "<|assistant|>", "\n\n"],
                     temperature=0.7,
                     repeat_penalty=1.1
                 )
                 
-                # Extraer texto generado
-                generated_text = response["choices"][0]["text"].strip()
+                # Extraer texto de respuesta
+                if isinstance(response, dict) and "choices" in response:
+                    text = response["choices"][0]["text"]
+                else:
+                    text = str(response)
                 
-                # Si la respuesta está vacía o es muy corta, usar respuesta por defecto
-                if not generated_text or len(generated_text) < 5:
-                    return "Entiendo tu consulta. ¿Podrías proporcionar más detalles para poder ayudarte mejor?"
+                # Limpiar respuesta
+                text = text.strip()
                 
-                return generated_text
+                # Si la respuesta está vacía, usar respuesta predeterminada
+                if not text:
+                    text = "No pude generar una respuesta. ¿Puedes reformular tu pregunta?"
+                
+                return text
             except Exception as e:
                 logger.error(f"Error generando respuesta con Llama: {e}")
-                return self._get_fallback_response(message)
-        
-        # Respuesta por defecto si el modelo no está disponible
-        return self._get_fallback_response(message)
+                return "Lo siento, tuve un problema generando una respuesta. Por favor, intenta de nuevo."
+        else:
+            # Respuesta por defecto si no hay modelo
+            return self._get_fallback_response(message)
     
-    def _detect_intent(self, message: str) -> Tuple[str, Dict[str, Any]]:
+    def _build_llama_prompt(self, conversation: ConversationHistory, message: str) -> str:
         """
-        Detecta la intención del usuario en el mensaje
+        Construye un prompt para el modelo Llama basado en el historial de conversación
         
         Args:
-            message: Mensaje del usuario
+            conversation: Historial de conversación
+            message: Mensaje actual del usuario
             
         Returns:
-            Tupla de (intención, parámetros)
+            Prompt formateado
         """
-        message_lower = message.lower()
+        # Obtener contexto adicional (datos de mercado y predicciones)
+        market_context = self._get_market_context()
         
-        # Patrones para estrategias
-        if any(pat in message_lower for pat in ["estrategia", "recomienda", "qué hacer", "sugieres"]):
-            # Buscar símbolo
-            symbol_match = re.search(r'(?:para|sobre|con|en)\s+(\w+)', message_lower)
-            symbol = symbol_match.group(1).upper() if symbol_match else None
-            return "get_strategy", {"symbol": symbol}
-        
-        # Patrones para portafolio
-        if any(pat in message_lower for pat in ["portafolio", "cartera", "posiciones", "acciones tengo"]):
-            return "get_portfolio", {}
-        
-        # Patrones para efectivo
-        if any(pat in message_lower for pat in ["efectivo", "cash", "dinero", "saldo", "balance"]):
-            return "get_cash", {}
-        
-        # Patrones para órdenes
-        if any(pat in message_lower for pat in ["comprar", "vender", "ejecutar orden", "colocar orden"]):
-            # Extraer parámetros
-            symbol_match = re.search(r'(?:comprar|vender)\s+(\w+)', message_lower)
-            quantity_match = re.search(r'(\d+)\s+(?:acciones|acción)', message_lower)
-            
-            params = {}
-            if symbol_match:
-                params["symbol"] = symbol_match.group(1).upper()
-            
-            if quantity_match:
-                params["quantity"] = int(quantity_match.group(1))
-            
-            params["action"] = "BUY" if "comprar" in message_lower else "SELL"
-            
-            return "place_order", params
-        
-        # Patrones para riesgo
-        if any(pat in message_lower for pat in ["riesgo", "volatilidad", "var", "rendimiento"]):
-            return "get_risk", {}
-        
-        # Patrones para datos de mercado
-        if any(pat in message_lower for pat in ["precio", "cotización", "mercado", "valor actual"]):
-            # Buscar símbolo
-            symbol_match = re.search(r'(?:de|para|sobre)\s+(\w+)', message_lower)
-            symbol = symbol_match.group(1).upper() if symbol_match else None
-            return "get_market_data", {"symbol": symbol}
-        
-        # Patrones para predicciones
-        if any(pat in message_lower for pat in ["predicción", "tendencia", "pronóstico", "modelo"]):
-            # Buscar símbolo
-            symbol_match = re.search(r'(?:de|para|sobre)\s+(\w+)', message_lower)
-            symbol = symbol_match.group(1).upper() if symbol_match else None
-            return "get_predictions", {"symbol": symbol}
-        
-        # Patrones para ayuda
-        if any(pat in message_lower for pat in ["ayuda", "help", "qué puedes hacer", "cómo funciona"]):
-            return "get_help", {}
-        
-        # Intención genérica
-        return "general", {}
-    
-    def _build_llama_prompt(self, conversation: ConversationHistory, current_message: str) -> str:
-        """
-        Construye un prompt adecuado para TinyLlama
-        
-        Args:
-            conversation: Historial de la conversación
-            current_message: Mensaje actual del usuario
-            
-        Returns:
-            Prompt formateado para TinyLlama
-        """
-        # Limitar a las últimas 10 interacciones para no exceder el contexto
-        recent_messages = conversation.messages[-10:]
-        
+        # Sistema prompt
         system_prompt = (
             "Eres un asistente financiero especializado en trading algorítmico. "
-            "Proporcionas análisis de mercado, estrategias de inversión y recomendaciones "
+            "Proporciona análisis de mercado, estrategias de inversión y recomendaciones "
             "basadas en modelos de machine learning. Tu objetivo es ayudar a los usuarios "
-            "a tomar decisiones financieras informadas y efectivas. Utiliza datos en tiempo real "
-            "y predicciones de modelos ensemble para ofrecer consejos personalizados."
+            "a tomar decisiones financieras informadas y efectivas."
         )
         
-        # Construir prompt según el formato de TinyLlama
-        prompt = f"<|system|>\n{system_prompt}\n<|endoftext|>\n"
+        # Construir historial de conversación
+        conversation_history = ""
+        for msg in conversation.messages[-6:-1]:  # últimos 5 mensajes (excluyendo el actual)
+            role = msg["role"]
+            content = msg["content"]
+            
+            if role == "user":
+                conversation_history += f"<|user|>\n{content}\n"
+            else:
+                conversation_history += f"<|assistant|>\n{content}\n"
         
-        # Agregar mensajes anteriores
-        for msg in recent_messages[:-1]:  # Todos menos el actual
-            if msg["role"] == "user":
-                prompt += f"<|user|>\n{msg['content']}\n<|endoftext|>\n"
-            else:  # assistant
-                prompt += f"<|assistant|>\n{msg['content']}\n<|endoftext|>\n"
+        # Formato final del prompt
+        prompt = f"{system_prompt}\n\n"
         
-        # Agregar mensaje actual
-        prompt += f"<|user|>\n{current_message}\n<|endoftext|>\n"
-        prompt += f"<|assistant|>\n"
+        if market_context:
+            prompt += f"Información de mercado actual:\n{market_context}\n\n"
+            
+        if conversation_history:
+            prompt += f"{conversation_history}\n"
+            
+        prompt += f"<|user|>\n{message}\n<|assistant|>\n"
         
         return prompt
     
-    def _get_fallback_response(self, message: str) -> str:
+    def _get_market_context(self) -> str:
         """
-        Genera una respuesta predefinida basada en patrones simples
+        Obtiene un resumen del contexto de mercado actual
+        
+        Returns:
+            Texto con información de mercado
+        """
+        symbols = self.cache.get_all_symbols()
+        if not symbols:
+            return ""
+        
+        context_lines = []
+        
+        # Seleccionar hasta 5 símbolos para incluir en el contexto
+        selected_symbols = symbols[:5]
+        
+        for symbol in selected_symbols:
+            market_data = self.cache.get_market_data(symbol)
+            predictions = self.cache.get_predictions(symbol)
+            strategy = self.cache.get_strategy(symbol)
+            
+            if market_data:
+                line = f"{symbol}: ${market_data.price:.2f} ({market_data.change:+.2f}%)"
+                
+                if predictions and len(predictions) > 0:
+                    latest_pred = predictions[-1]
+                    line += f", Predicción: {latest_pred.prediction:.2f} (Confianza: {latest_pred.confidence:.2f})"
+                
+                if strategy:
+                    line += f", Recomendación: {strategy.action}"
+                
+                context_lines.append(line)
+        
+        return "\n".join(context_lines)
+    
+    def _detect_intent(self, message: str) -> Tuple[str, Dict[str, Any]]:
+        """
+        Detecta la intención del usuario a partir del mensaje
         
         Args:
             message: Mensaje del usuario
             
         Returns:
-            Respuesta predefinida
+            Tuple con intención detectada y parámetros
         """
         message = message.lower()
+        params = {}
         
-        # Patrones básicos de respuesta
-        if "hola" in message or "buenos días" in message or "buenas tardes" in message:
-            return "¡Hola! Soy tu asistente de inversiones. ¿En qué puedo ayudarte hoy con tus estrategias de trading?"
-            
-        if "gracias" in message:
-            return "¡De nada! Estoy aquí para ayudarte a maximizar tus inversiones con nuestros modelos predictivos. ¿Hay algo más en lo que pueda asistirte?"
-            
-        if "help" in message or "ayuda" in message or "qué puedes hacer" in message:
-            return self._get_help_info()
-            
-        if "predic" in message or "tendencia" in message or "mercado" in message:
-            return "Nuestros modelos predictivos analizan constantemente el mercado combinando análisis técnico y fundamental. Para obtener una estrategia específica para un símbolo, pregúntame algo como '¿Qué estrategia recomiendas para AAPL?'"
-            
-        # Respuesta genérica
-        return ("Soy tu asistente de inversiones con IA. Puedo analizar tu portafolio, generar estrategias basadas en "
-                "nuestros modelos predictivos ensemble, y ayudarte a tomar decisiones informadas. "
-                "¿Sobre qué símbolo o aspecto de trading te gustaría consultar hoy?")
-    
-    def _get_help_info(self) -> str:
-        """Proporciona información de ayuda sobre el asistente"""
-        help_text = (
-            "# Asistente de Trading con IA\n\n"
-            "Soy tu asistente financiero impulsado por modelos de IA y puedo ayudarte con:\n\n"
-            "### Análisis y Estrategias\n"
-            "- **Estrategias personalizadas**: Pregunta '¿Qué estrategia recomiendas para AAPL?'\n"
-            "- **Análisis de mercado**: Solicita 'Dame el análisis actual de TSLA'\n"
-            "- **Predicciones de modelos**: Pregunta '¿Qué predicen los modelos para MSFT?'\n\n"
-            "### Gestión de Portafolio\n"
-            "- **Ver portafolio**: Pregunta 'Muéstrame mi portafolio actual'\n"
-            "- **Efectivo disponible**: Consulta '¿Cuánto efectivo tengo?'\n"
-            "- **Métricas de riesgo**: Solicita 'Dame mis métricas de riesgo'\n\n"
-            "### Operaciones\n"
-            "- **Crear órdenes**: Di 'Quiero comprar 10 acciones de AMZN'\n"
-            "- **Ejecutar estrategias**: Solicita 'Ejecuta la estrategia recomendada para GOOG'\n\n"
-            "Estoy constantemente analizando datos de mercado y utilizando nuestro modelo ensemble para ofrecerte "
-            "las mejores recomendaciones basadas en datos en tiempo real."
-        )
-        return help_text
-    
-    def _get_portfolio_info(self) -> str:
-        """Obtiene información del portafolio"""
-        try:
-            # Importar el estado del broker 
-            from app import broker_state
-            
-            portfolio = broker_state["portfolio"]
-            positions = portfolio["positions"]
-            
-            if not positions:
-                return "Actualmente no tienes posiciones abiertas en tu portafolio. Tu efectivo disponible es de $" + f"{portfolio['cash']:,.2f}"
-            
-            # Construir respuesta
-            response = "# Resumen de tu Portafolio\n\n"
-            response += f"**Efectivo disponible:** ${portfolio['cash']:,.2f}\n\n"
-            response += "## Posiciones actuales\n\n"
-            
-            # Tabla de posiciones
-            response += "| Símbolo | Cantidad | Precio Actual | Valor | Coste Medio | P&L |\n"
-            response += "|---------|----------|--------------|-------|-------------|-----|\n"
-            
-            total_pl = 0
-            for symbol, position in positions.items():
-                # Calcular P&L
-                pl = (position['current_price'] - position['avg_cost']) * position['quantity']
-                pl_percent = (position['current_price'] / position['avg_cost'] - 1) * 100
-                total_pl += pl
-                
-                # Añadir fila a la tabla
-                response += f"| {symbol} | {position['quantity']} | ${position['current_price']:,.2f} | ${position['market_value']:,.2f} | ${position['avg_cost']:,.2f} | ${pl:,.2f} ({pl_percent:+.2f}%) |\n"
-            
-            # Resumen con métricas clave
-            response += f"\n## Valor total: ${portfolio['total_value']:,.2f}\n"
-            pl_total_percent = (total_pl / (portfolio['total_value'] - total_pl - portfolio['cash'])) * 100 if (portfolio['total_value'] - total_pl - portfolio['cash']) > 0 else 0
-            response += f"**P&L Total:** ${total_pl:,.2f} ({pl_total_percent:+.2f}%)\n"
-            
-            # Añadir recomendaciones basadas en el portafolio actual
-            response += "\n## Recomendaciones para tu portafolio\n\n"
-            
-            # Analizar cada posición
-            for symbol in positions.keys():
-                strategy = self.cache.get_strategy(symbol) or self._generate_symbol_strategy(symbol)
-                action_emoji = "🔴 VENDER" if strategy.action == "SELL" else "🟢 COMPRAR" if strategy.action == "BUY" else "⚪ MANTENER"
-                response += f"**{symbol}:** {action_emoji} - {strategy.reasoning[:100]}...\n"
-            
-            return response
-        except Exception as e:
-            logger.error(f"Error obteniendo información del portafolio: {e}")
-            return "Lo siento, no pude obtener la información de tu portafolio en este momento."
-    
-    def _get_cash_info(self) -> str:
-        """Obtiene información del efectivo disponible"""
-        try:
-            # Importar el estado del broker
-            from app import broker_state
-            
-            cash = broker_state["portfolio"]["cash"]
-            total_value = broker_state["portfolio"]["total_value"]
-            cash_ratio = cash / total_value if total_value > 0 else 1.0
-            
-            # Construir respuesta
-            response = "# Información de Efectivo\n\n"
-            response += f"**Efectivo disponible:** ${cash:,.2f}\n"
-            response += f"**Ratio de efectivo:** {cash_ratio:.2%} del portafolio\n\n"
-            
-            # Añadir recomendaciones basadas en el ratio de efectivo
-            if cash_ratio > 0.7:
-                response += ("## Recomendación\n\n"
-                             "Tienes un nivel alto de efectivo en tu portafolio. Considera diversificar "
-                             "invirtiendo en acciones con potencial de crecimiento según nuestros modelos predictivos. "
-                             "Puedes preguntar: '¿Qué estrategias recomiendas para invertir mi efectivo?'")
-            elif cash_ratio < 0.1:
-                response += ("## Recomendación\n\n"
-                             "Tu nivel de efectivo es bajo. Considera mantener entre un 15-30% en efectivo "
-                             "para aprovechar oportunidades de mercado y gestionar el riesgo de forma adecuada.")
-            else:
-                response += ("## Recomendación\n\n"
-                             "Tu nivel de efectivo está en un rango adecuado para balancear oportunidades "
-                             "de inversión y seguridad. Continúa monitoreando las recomendaciones de nuestros "
-                             "modelos para optimizar tu asignación de capital.")
-            
-            return response
-        except Exception as e:
-            logger.error(f"Error obteniendo información del efectivo: {e}")
-            return "Lo siento, no pude obtener la información de tu efectivo en este momento."
-    
-    def _get_risk_metrics(self) -> str:
-        """Obtiene métricas de riesgo"""
-        try:
-            # Importar el estado del broker
-            from app import broker_state
-            
-            metrics = broker_state["metrics"]
-            risk_metrics = metrics["risk_metrics"]["portfolio"]
-            performance = metrics["performance"]
-            
-            # Construir respuesta
-            response = "# Métricas de Riesgo y Rendimiento\n\n"
-            
-            # Rendimiento
-            response += "## Métricas de Rendimiento\n"
-            response += f"- **Retorno total:** {performance['total_return']:.2f}%\n"
-            response += f"- **Posiciones activas:** {performance['positions_count']}\n"
-            
-            # Riesgo
-            response += "\n## Métricas de Riesgo\n"
-            response += f"- **Diversificación:** {risk_metrics['diversification_score']:.2f}/1.0\n"
-            response += f"- **Ratio de efectivo:** {risk_metrics['cash_ratio']:.2f}\n"
-            
-            # Añadir recomendaciones
-            response += "\n## Análisis y Recomendaciones\n\n"
-            
-            # Analizar diversificación
-            if risk_metrics['diversification_score'] < 0.3:
-                response += ("Tu portafolio está poco diversificado, lo que aumenta el riesgo. "
-                             "Considera invertir en diferentes sectores y activos.\n\n")
-            
-            # Analizar ratio de efectivo
-            if risk_metrics['cash_ratio'] < 0.1:
-                response += ("Tu ratio de efectivo es bajo, lo que reduce tu capacidad para aprovechar oportunidades. "
-                             "Considera mantener más liquidez.\n\n")
-            elif risk_metrics['cash_ratio'] > 0.5:
-                response += ("Tienes un alto nivel de efectivo, lo que puede reducir tu rendimiento potencial. "
-                             "Considera invertir según nuestras recomendaciones de modelo.\n\n")
-            
-            # Recomendación general
-            if performance['total_return'] < 0:
-                response += ("Tu rendimiento total es negativo. Nuestros modelos pueden ayudarte a identificar "
-                             "mejores oportunidades. Pregunta por estrategias específicas.\n")
-            
-            return response
-        except Exception as e:
-            logger.error(f"Error obteniendo métricas de riesgo: {e}")
-            return "Lo siento, no pude obtener las métricas de riesgo en este momento."
-    
-    def _handle_order_intent(self, params: Dict[str, Any]) -> str:
-        """
-        Procesa la intención de crear una orden
+        # Detectar símbolos mencionados
+        symbol_pattern = r'\b([A-Z]{1,5}(?:\.MC|\.IS)?)\b'
+        symbols = re.findall(symbol_pattern, message.upper())
+        if symbols:
+            params["symbol"] = symbols[0]  # Usar el primer símbolo encontrado
         
-        Args:
-            params: Parámetros de la orden
+        # Detectar intenciones específicas
+        if re.search(r'\bestrategia|recomienda|qué (debo|debería) hacer|compro|vendo\b', message):
+            return "get_strategy", params
+        elif re.search(r'\bportafolio|cartera|posiciones|inversiones|tenencias\b', message):
+            return "get_portfolio", params
+        elif re.search(r'\befectivo|cash|saldo|dinero|capital\b', message):
+            return "get_cash", params
+        elif re.search(r'\bcompra[r]?|vende[r]?|orden\b', message) and "symbol" in params:
+            # Detectar cantidad
+            qty_pattern = r'(\d+)\s+(acciones|títulos|unidades)'
+            qty_match = re.search(qty_pattern, message)
+            if qty_match:
+                params["quantity"] = int(qty_match.group(1))
             
-        Returns:
-            Respuesta informativa
-        """
-        symbol = params.get("symbol")
-        quantity = params.get("quantity")
-        action = params.get("action")
+            # Detectar acción
+            if re.search(r'\bcompra[r]?\b', message):
+                params["action"] = "BUY"
+            elif re.search(r'\bvende[r]?\b', message):
+                params["action"] = "SELL"
+                
+            return "place_order", params
+        elif re.search(r'\briesgo|volatilidad|exposición\b', message):
+            return "get_risk", params
+        elif re.search(r'\bprecio|cotización|datos|valor\b', message) and "symbol" in params:
+            return "get_market_data", params
+        elif re.search(r'\bpredicci[óo]n|previ[óo]n|estimaci[óo]n|forecast\b', message) and "symbol" in params:
+            return "get_predictions", params
+        elif re.search(r'\bayuda|help|comandos|cómo\b', message):
+            return "get_help", params
         
-        if not symbol or not action:
-            return (
-                "Para ejecutar una orden necesito más detalles. Por favor especifica:\n"
-                "- El símbolo (ej. AAPL, MSFT)\n"
-                "- La acción (comprar o vender)\n"
-                "- La cantidad de acciones\n\n"
-                "Por ejemplo: 'Quiero comprar 10 acciones de AAPL'"
-            )
-        
-        # Si no se especificó cantidad, pedir al usuario
-        if not quantity:
-            return f"¿Cuántas acciones de {symbol} deseas {action.lower()}?"
-        
-        # Obtener datos de mercado para ese símbolo
-        market_data = self.cache.get_market_data(symbol)
-        current_price = market_data.price if market_data else 0
-        
-        if not current_price:
-            # Obtener precio actual
-            try:
-                url = f"https://financialmodelingprep.com/api/v3/quote/{symbol}?apikey={self.fmp_api_key}"
-                response = requests.get(url, timeout=10)
-                
-                if response.status_code == 200:
-                    quotes = response.json()
-                    if quotes:
-                        current_price = quotes[0]["price"]
-                else:
-                    logger.warning(f"No se pudo obtener el precio para {symbol}")
-            except Exception as e:
-                logger.error(f"Error obteniendo precio para {symbol}: {e}")
-        
-        # Si aún no tenemos precio, informar al usuario
-        if not current_price:
-            return f"No pude obtener el precio actual para {symbol}. Por favor, intenta de nuevo más tarde."
-        
-        # Calcular costo total
-        total_cost = quantity * current_price
-        
-        # Verificar si hay efectivo suficiente para compras
-        if action == "BUY":
-            try:
-                from app import broker_state
-                cash = broker_state["portfolio"]["cash"]
-                
-                if total_cost > cash:
-                    return (
-                        f"No tienes suficiente efectivo para esta compra.\n\n"
-                        f"- Costo total: ${total_cost:,.2f}\n"
-                        f"- Efectivo disponible: ${cash:,.2f}\n\n"
-                        f"Considera reducir la cantidad de acciones o usar una orden limitada."
-                    )
-            except Exception as e:
-                logger.error(f"Error verificando efectivo: {e}")
-        
-        # Obtener predicción del modelo para ese símbolo
-        strategy = self.cache.get_strategy(symbol) or self._generate_symbol_strategy(symbol)
-        
-        # Generar consejo basado en la estrategia
-        advice = ""
-        if action == "BUY" and strategy.action != "BUY":
-            advice = (
-                f"\n\n**Nota:** Nuestro modelo recomienda {strategy.action} para {symbol} con una "
-                f"confianza del {strategy.confidence*100:.1f}%. Considera revisar la estrategia "
-                f"antes de proceder."
-            )
-        elif action == "SELL" and strategy.action != "SELL":
-            advice = (
-                f"\n\n**Nota:** Nuestro modelo recomienda {strategy.action} para {symbol} con una "
-                f"confianza del {strategy.confidence*100:.1f}%. Considera mantener la posición "
-                f"según nuestra predicción."
-            )
-        
-        # Construir respuesta
-        response = (
-            f"# Orden de {action}\n\n"
-            f"He preparado una orden para {action.lower()} {quantity} acciones de {symbol}:\n\n"
-            f"- **Símbolo:** {symbol}\n"
-            f"- **Acción:** {action}\n"
-            f"- **Cantidad:** {quantity}\n"
-            f"- **Precio estimado:** ${current_price:,.2f}\n"
-            f"- **Valor total:** ${total_cost:,.2f}\n"
-            f"{advice}\n\n"
-            f"Para ejecutar esta orden, confirma con 'ejecutar orden' o utiliza "
-            f"la interfaz de órdenes con los parámetros específicos."
-        )
-        
-        return response
-    
-    def _get_market_data(self, symbol: Optional[str] = None) -> str:
-        """
-        Obtiene datos de mercado para un símbolo o varios símbolos
-        
-        Args:
-            symbol: Símbolo específico o None para todos
-            
-        Returns:
-            Datos de mercado formateados
-        """
-        try:
-            # Si no se especificó símbolo, usar todos los disponibles o los comunes
-            if not symbol:
-                symbols = self.cache.get_all_symbols()
-                if not symbols:
-                    symbols = ["AAPL", "MSFT", "GOOG", "AMZN", "TSLA"]
-                
-                # Construir respuesta con múltiples símbolos
-                response = "# Datos de Mercado\n\n"
-                
-                # Tabla de datos
-                response += "| Símbolo | Precio | Cambio | Volumen |\n"
-                response += "|---------|--------|--------|--------|\n"
-                
-                for sym in symbols:
-                    market_data = self.cache.get_market_data(sym)
-                    
-                    if market_data:
-                        # Formatear cambio con color
-                        change_sign = "+" if market_data.change >= 0 else ""
-                        response += f"| {sym} | ${market_data.price:,.2f} | {change_sign}{market_data.change:,.2f} | {market_data.volume:,} |\n"
-                    else:
-                        response += f"| {sym} | - | - | - |\n"
-                
-                return response
-            else:
-                # Datos para un símbolo específico
-                market_data = self.cache.get_market_data(symbol)
-                
-                if not market_data:
-                    # Intentar obtener datos en tiempo real
-                    try:
-                        url = f"https://financialmodelingprep.com/api/v3/quote/{symbol}?apikey={self.fmp_api_key}"
-                        response = requests.get(url, timeout=10)
-                        
-                        if response.status_code == 200:
-                            quotes = response.json()
-                            if quotes:
-                                quote = quotes[0]
-                                market_data = MarketData(
-                                    symbol=quote["symbol"],
-                                    price=quote["price"],
-                                    change=quote["change"],
-                                    volume=quote["volume"],
-                                    timestamp=datetime.now().isoformat()
-                                )
-                                self.cache.update_market_data(symbol, market_data)
-                        else:
-                            return f"No se pudieron obtener datos para {symbol}. Verifica que el símbolo sea correcto."
-                    except Exception as e:
-                        logger.error(f"Error obteniendo datos para {symbol}: {e}")
-                        return f"No pude obtener datos para {symbol} en este momento."
-                
-                if market_data:
-                    # Construir respuesta detallada
-                    response = f"# Datos de Mercado para {symbol}\n\n"
-                    
-                    # Datos básicos
-                    response += f"**Precio actual:** ${market_data.price:,.2f}\n"
-                    change_sign = "+" if market_data.change >= 0 else ""
-                    response += f"**Cambio:** {change_sign}{market_data.change:,.2f}\n"
-                    response += f"**Volumen:** {market_data.volume:,}\n"
-                    
-                    # Añadir estrategia recomendada
-                    strategy = self.cache.get_strategy(symbol) or self._generate_symbol_strategy(symbol)
-                    
-                    response += f"\n## Estrategia recomendada: {strategy.action}\n\n"
-                    response += f"{strategy.reasoning}\n\n"
-                    response += f"**Confianza:** {strategy.confidence*100:.1f}%\n"
-                    response += f"**Horizonte temporal:** {strategy.time_horizon}\n"
-                    
-                    return response
-                else:
-                    return f"No pude obtener datos para {symbol}. Por favor verifica que el símbolo sea correcto."
-        except Exception as e:
-            logger.error(f"Error obteniendo datos de mercado: {e}")
-            return "Lo siento, no pude obtener los datos de mercado en este momento."
-    
-    def _get_predictions(self, symbol: Optional[str] = None) -> str:
-        """
-        Obtiene predicciones para un símbolo o varios símbolos
-        
-        Args:
-            symbol: Símbolo específico o None para todos
-            
-        Returns:
-            Predicciones formateadas
-        """
-        try:
-            # Si no se especificó símbolo, usar todos los disponibles
-            if not symbol:
-                symbols = self.cache.get_all_symbols()
-                
-                # Construir respuesta con múltiples símbolos
-                response = "# Predicciones de Modelos\n\n"
-                
-                # Tabla mejorada con mejor formato y alineación
-                response += "| Símbolo | Predicción | Confianza | Acción Recomendada | Horizonte |\n"
-                response += "|:-------:|:----------:|:---------:|:------------------:|:---------:|\n"
-                
-                for sym in symbols:
-                    strategy = self.cache.get_strategy(sym) or self._generate_symbol_strategy(sym)
-                    
-                    # Formatear predicción con signo y mejora de presentación
-                    pred_sign = "+" if strategy.prediction >= 0 else ""
-                    action_format = {
-                        "BUY": "🟢 **COMPRAR**",
-                        "SELL": "🔴 **VENDER**",
-                        "HOLD": "⚪ **MANTENER**"
-                    }.get(strategy.action, strategy.action)
-                    
-                    response += f"| **{sym}** | {pred_sign}{strategy.prediction:.2f}% | {strategy.confidence*100:.1f}% | {action_format} | {strategy.time_horizon} |\n"
-                
-                return response
-            else:
-                # Predicciones para un símbolo específico
-                predictions = self.cache.get_predictions(symbol)
-                strategy = self.cache.get_strategy(symbol) or self._generate_symbol_strategy(symbol)
-                
-                # Construir respuesta detallada
-                response = f"# Análisis Predictivo para {symbol}\n\n"
-                
-                # Estrategia principal
-                response += f"## Estrategia recomendada: {strategy.action}\n\n"
-                response += f"{strategy.reasoning}\n\n"
-                response += f"**Predicción de variación:** {'+' if strategy.prediction > 0 else ''}{strategy.prediction:.2f}%\n"
-                response += f"**Confianza:** {strategy.confidence*100:.1f}%\n"
-                response += f"**Horizonte temporal:** {strategy.time_horizon}\n"
-                response += f"**Nivel de riesgo:** {strategy.risk_level}\n\n"
-                
-                # Detalles de los modelos
-                if predictions:
-                    response += "## Detalle de modelos\n\n"
-                    
-                    for i, pred in enumerate(predictions):
-                        response += f"### Modelo {pred.model_type}\n"
-                        response += f"- **Predicción:** {'+' if pred.prediction > 0 else ''}{pred.prediction:.2f}%\n"
-                        response += f"- **Confianza:** {pred.confidence*100:.1f}%\n"
-                        
-                        # Si hay características importantes
-                        if pred.features:
-                            response += "- **Factores clave:**\n"
-                            
-                            # Mostrar las 3 características más importantes
-                            sorted_features = sorted(pred.features.items(), key=lambda x: abs(x[1]), reverse=True)[:3]
-                            for feature, importance in sorted_features:
-                                response += f"  - {feature}: {importance:.3f}\n"
-                
-                # Recomendación final
-                response += "\n## Recomendación de acción\n\n"
-                if strategy.action == "BUY":
-                    response += "🟢 **COMPRAR**: Los indicadores técnicos y fundamentales sugieren una oportunidad favorable de compra.\n"
-                elif strategy.action == "SELL":
-                    response += "🔴 **VENDER**: Los modelos predictivos indican una tendencia bajista que sugiere reducir exposición.\n"
-                else:  # HOLD
-                    response += "⚪ **MANTENER**: La señal actual no es lo suficientemente fuerte para sugerir un cambio de posición.\n"
-                
-                return response
-        except Exception as e:
-            logger.error(f"Error obteniendo predicciones: {e}")
-            return "Lo siento, no pude obtener las predicciones en este momento."
-    
-    def _get_investment_strategy(self, symbol: Optional[str] = None) -> str:
-        """
-        Genera una estrategia de inversión basada en datos de modelos
-        
-        Args:
-            symbol: Símbolo opcional para estrategia específica
-            
-        Returns:
-            Estrategia recomendada
-        """
-        # Si no se especificó un símbolo, dar recomendaciones para el portafolio
-        if not symbol:
-            try:
-                # Importar el estado del broker
-                from app import broker_state
-                
-                # Obtener símbolos del portafolio
-                portfolio = broker_state["portfolio"]
-                positions = portfolio["positions"]
-                
-                # Si no hay posiciones, recomendar símbolos comunes
-                if not positions:
-                    common_symbols = ["AAPL", "MSFT", "GOOG", "AMZN", "TSLA"]
-                    strategies = []
-                    
-                    for sym in common_symbols:
-                        strategy = self.cache.get_strategy(sym) or self._generate_symbol_strategy(sym)
-                        if strategy.action == "BUY":
-                            strategies.append((sym, strategy))
-                    
-                    # Si hay estrategias de compra, mostrarlas
-                    if strategies:
-                        response = (
-                            "# Estrategias de Inversión Recomendadas\n\n"
-                            "No tienes posiciones actualmente. Basado en nuestros modelos predictivos, "
-                            "aquí tienes algunas recomendaciones para comenzar:\n\n"
-                        )
-                        
-                        for sym, strategy in strategies:
-                            response += f"## {sym}: {strategy.action}\n\n"
-                            response += f"{strategy.reasoning}\n\n"
-                            response += f"**Confianza:** {strategy.confidence*100:.1f}%\n"
-                            response += f"**Horizonte temporal:** {strategy.time_horizon}\n"
-                            response += f"**Nivel de riesgo:** {strategy.risk_level}\n\n"
-                        
-                        return response
-                    else:
-                        return (
-                            "# Análisis de Mercado\n\n"
-                            "No tienes posiciones actualmente y nuestros modelos no detectan "
-                            "señales claras de compra en este momento. Considera esperar mejores "
-                            "oportunidades o consultar por un símbolo específico."
-                        )
-                
-                # Generar estrategias para los símbolos en el portafolio
-                response = (
-                    "# Estrategias para tu Portafolio\n\n"
-                    "Basado en las predicciones de nuestros modelos, aquí están las estrategias "
-                    "recomendadas para tus posiciones actuales:\n\n"
-                )
-                
-                for symbol in positions.keys():
-                    strategy = self.cache.get_strategy(symbol) or self._generate_symbol_strategy(symbol)
-                    
-                    response += f"## {symbol}: {strategy.action}\n\n"
-                    response += f"{strategy.reasoning}\n\n"
-                    response += f"**Confianza:** {strategy.confidence*100:.1f}%\n"
-                    response += f"**Horizonte temporal:** {strategy.time_horizon}\n"
-                    response += f"**Nivel de riesgo:** {strategy.risk_level}\n\n"
-                
-                # Recomendación general
-                cash = portfolio["cash"]
-                total_value = portfolio["total_value"]
-                cash_ratio = cash / total_value if total_value > 0 else 1.0
-                
-                response += "## Recomendación general\n\n"
-                
-                if cash_ratio > 0.3:
-                    response += (
-                        f"Tienes un {cash_ratio:.1%} de tu portafolio en efectivo. Considera invertir "
-                        f"en las oportunidades señaladas por nuestros modelos para optimizar tu rendimiento."
-                    )
-                else:
-                    response += (
-                        f"Tu portafolio está bien invertido con solo un {cash_ratio:.1%} en efectivo. "
-                        f"Mantén reservas suficientes para aprovechar nuevas oportunidades."
-                    )
-                
-                return response
-            except Exception as e:
-                logger.error(f"Error generando estrategias generales: {e}")
-                return "No pude generar estrategias en este momento. Por favor, intenta especificar un símbolo concreto."
-        else:
-            # Generar estrategia para un símbolo específico
-            try:
-                strategy = self.cache.get_strategy(symbol) or self._generate_symbol_strategy(symbol)
-                
-                # Obtener datos de mercado
-                market_data = self.cache.get_market_data(symbol)
-                market_context = ""
-                
-                if market_data:
-                    change_sign = "+" if market_data.change >= 0 else ""
-                    market_context = (
-                        f"### Datos de mercado\n"
-                        f"- **Precio actual:** ${market_data.price:,.2f}\n"
-                        f"- **Cambio:** {change_sign}{market_data.change:,.2f}\n"
-                        f"- **Volumen:** {market_data.volume:,}\n\n"
-                    )
-                
-                # Construir respuesta detallada
-                response = (
-                    f"# Estrategia para {symbol}\n\n"
-                    f"## Recomendación: {strategy.action}\n\n"
-                    f"{strategy.reasoning}\n\n"
-                    f"### Detalles de la estrategia\n"
-                    f"- **Horizonte temporal:** {strategy.time_horizon}\n"
-                    f"- **Nivel de riesgo:** {strategy.risk_level}\n"
-                    f"- **Confianza:** {strategy.confidence*100:.1f}%\n"
-                    f"- **Predicción:** {'+' if strategy.prediction > 0 else ''}{strategy.prediction:.2f}% "
-                    f"de variación esperada\n\n"
-                    f"{market_context}"
-                    f"Esta estrategia se basa en el análisis de nuestro modelo ensemble que combina "
-                    f"datos históricos con patrones en tiempo real."
-                )
-                
-                return response
-            except Exception as e:
-                logger.error(f"Error generando estrategia para {symbol}: {e}")
-                return f"No pude generar una estrategia para {symbol} en este momento. Posiblemente no tenemos suficientes datos para este símbolo."
+        # Si no se detecta ninguna intención específica
+        return "general_chat", params
     
     def _generate_symbol_strategy(self, symbol: str) -> BrokerStrategy:
         """
-        Genera una estrategia para un símbolo específico
+        Genera una estrategia de inversión para un símbolo
         
         Args:
             symbol: Símbolo del activo
             
         Returns:
-            Objeto BrokerStrategy con la estrategia recomendada
+            Estrategia de inversión
         """
-        # Intentar obtener predicciones del modelo ensemble
-        ensemble_prediction = 0.0
-        online_prediction = 0.0
-        confidence = 0.6  # Valor por defecto
+        # Intentar obtener predicciones reales
+        predictions = self.cache.get_predictions(symbol)
+        market_data = self.cache.get_market_data(symbol)
         
-        # Comprobar si hay una estrategia en caché
-        cached_strategy = self.cache.get_strategy(symbol)
-        if cached_strategy and cached_strategy.symbol == symbol:
-            return cached_strategy
-        
-        # Intentar usar el coordinador de modelos
-        if self.model_coordinator:
-            try:
-                # Buscar el símbolo en los gestores
-                symbol_managers = self.model_coordinator.symbol_managers
-                if symbol in symbol_managers:
-                    manager = symbol_managers[symbol]
-                    
-                    # Extraer predicciones y conocimiento
-                    online_kb = manager.online_knowledge_base if hasattr(manager, 'online_knowledge_base') else {}
-                    offline_kb = manager.offline_knowledge_base if hasattr(manager, 'offline_knowledge_base') else {}
-                    
-                    # Calcular predicción ensemble (promedio ponderado)
-                    online_perf = online_kb.get('performance', 0.5)
-                    offline_perf = offline_kb.get('performance', 0.5)
-                    
-                    total_perf = online_perf + offline_perf
-                    online_weight = online_perf / total_perf if total_perf > 0 else 0.5
-                    offline_weight = offline_perf / total_perf if total_perf > 0 else 0.5
-                    
-                    online_prediction = online_kb.get('prediction_trend', 0.0)
-                    offline_prediction = offline_kb.get('prediction_trend', 0.0)
-                    
-                    ensemble_prediction = (offline_prediction * offline_weight) + (online_prediction * online_weight)
-                    confidence = max(offline_kb.get('confidence', 0.5), online_kb.get('confidence', 0.5))
-            except Exception as e:
-                logger.error(f"Error obteniendo predicciones para {symbol}: {e}")
-        
-        # Si no hay predicciones del modelo, generar datos simulados
-        if ensemble_prediction == 0:
-            import random
+        # Si tenemos datos reales, usarlos para la estrategia
+        if predictions and len(predictions) > 0 and market_data:
+            # Usar la predicción más reciente
+            latest_pred = predictions[-1]
+            prediction = latest_pred.prediction
+            confidence = latest_pred.confidence
             
-            # Usar datos de mercado recientes si están disponibles
-            market_data = self.cache.get_market_data(symbol)
-            
-            if market_data and hasattr(market_data, 'change'):
-                # Usar datos de mercado para influir en la predicción
-                change_pct = market_data.change / market_data.price * 100 if market_data.price > 0 else 0
-                # Proyectar la tendencia reciente con ruido
-                ensemble_prediction = change_pct * 1.5 + random.uniform(-2.0, 2.0)
-                # Más confianza si hay datos reales
-                confidence = random.uniform(0.55, 0.85)
+            # Determinar acción basada en la predicción
+            if prediction > 0.15 and confidence > 0.6:
+                action = "BUY"
+                reasoning = f"Fuerte señal alcista con {confidence:.2f} de confianza."
+                risk_level = "MODERATE"
+            elif prediction > 0.05 and confidence > 0.5:
+                action = "BUY"
+                reasoning = f"Señal alcista con {confidence:.2f} de confianza."
+                risk_level = "LOW"
+            elif prediction < -0.15 and confidence > 0.6:
+                action = "SELL"
+                reasoning = f"Fuerte señal bajista con {confidence:.2f} de confianza."
+                risk_level = "HIGH"
+            elif prediction < -0.05 and confidence > 0.5:
+                action = "SELL"
+                reasoning = f"Señal bajista con {confidence:.2f} de confianza."
+                risk_level = "MODERATE"
             else:
-                # Completamente aleatorio si no hay datos
-                ensemble_prediction = random.uniform(-5.0, 5.0)
-                online_prediction = ensemble_prediction + random.uniform(-1.0, 1.0)
-                confidence = random.uniform(0.5, 0.75)
-        
-        # Determinar acción basada en la predicción
-        action = "HOLD"  # Por defecto
-        if ensemble_prediction > 1.5 and confidence > 0.6:
-            action = "BUY"
-        elif ensemble_prediction < -1.5 and confidence > 0.6:
-            action = "SELL"
-        
-        # Determinar horizonte y riesgo
-        time_horizon = "MEDIUM"
-        if abs(ensemble_prediction) > 4:
-            time_horizon = "SHORT"
-        elif abs(ensemble_prediction) < 2:
-            time_horizon = "LONG"
+                action = "HOLD"
+                reasoning = f"No hay señal clara. Confianza: {confidence:.2f}"
+                risk_level = "LOW"
+                
+            # Determinar horizonte temporal
+            time_horizon = "MEDIUM"  # Por defecto
             
-        risk_level = "MODERATE"
-        if abs(ensemble_prediction - online_prediction) > 2:
-            risk_level = "HIGH"
-        elif confidence > 0.75:
-            risk_level = "LOW"
+            # Crear y devolver estrategia
+            return BrokerStrategy(
+                symbol=symbol,
+                action=action,
+                confidence=confidence,
+                prediction=prediction,
+                reasoning=reasoning,
+                time_horizon=time_horizon,
+                risk_level=risk_level
+            )
+        else:
+            # Generar estrategia simulada si no hay datos reales
+            # Usar números aleatorios deterministas
+            np.random.seed(hash(symbol) % 10000)
+            
+            # Generar predicción aleatoria entre -0.2 y 0.2
+            prediction = np.random.uniform(-0.2, 0.2)
+            confidence = np.random.uniform(0.5, 0.9)
+            
+            # Determinar acción basada en la predicción simulada
+            if prediction > 0.1:
+                action = "BUY"
+                reasoning = "Tendencia alcista detectada."
+                risk_level = "MODERATE"
+            elif prediction < -0.1:
+                action = "SELL"
+                reasoning = "Tendencia bajista detectada."
+                risk_level = "MODERATE"
+            else:
+                action = "HOLD"
+                reasoning = "Mercado sin tendencia clara."
+                risk_level = "LOW"
+            
+            # Posibles horizontes temporales
+            time_horizons = ["SHORT", "MEDIUM", "LONG"]
+            time_horizon = np.random.choice(time_horizons)
+            
+            # Crear y devolver estrategia simulada
+            return BrokerStrategy(
+                symbol=symbol,
+                action=action,
+                confidence=confidence,
+                prediction=prediction,
+                reasoning=reasoning,
+                time_horizon=time_horizon,
+                risk_level=risk_level
+            )
+    
+    def _get_investment_strategy(self, symbol: str) -> str:
+        """
+        Obtiene la estrategia de inversión para un símbolo
         
-        # Generar razonamiento
+        Args:
+            symbol: Símbolo del activo
+            
+        Returns:
+            Texto con la estrategia
+        """
+        if not symbol:
+            return "Por favor, especifica un símbolo de activo (por ejemplo, AAPL, MSFT, etc.)"
+        
+        # Obtener datos del símbolo
+        strategy = self.cache.get_strategy(symbol)
+        market_data = self.cache.get_market_data(symbol)
+        
+        if not strategy:
+            # Generar estrategia si no existe
+            strategy = self._generate_symbol_strategy(symbol)
+            self.cache.update_strategy(symbol, strategy)
+        
+        # Construir respuesta
+        response = [f"**Estrategia para {symbol}**"]
+        
+        if market_data:
+            response.append(f"Precio actual: ${market_data.price:.2f} ({market_data.change:+.2f}%)")
+        
+        response.append(f"Recomendación: {strategy.action}")
+        response.append(f"Confianza: {strategy.confidence:.2f}")
+        response.append(f"Predicción: {strategy.prediction:.2f}")
+        response.append(f"Razonamiento: {strategy.reasoning}")
+        response.append(f"Horizonte temporal: {strategy.time_horizon}")
+        response.append(f"Nivel de riesgo: {strategy.risk_level}")
+        
+        return "\n".join(response)
+    
+    def _get_portfolio_info(self) -> str:
+        """
+        Obtiene información del portafolio
+        
+        Returns:
+            Texto con la información del portafolio
+        """
+        # Esta es una versión simulada - en una implementación real conectaría con una BD
+        portfolio = [
+            {"symbol": "AAPL", "quantity": 10, "avg_price": 175.23, "current_price": 178.45},
+            {"symbol": "MSFT", "quantity": 5, "avg_price": 330.12, "current_price": 338.22},
+            {"symbol": "GOOG", "quantity": 8, "avg_price": 138.72, "current_price": 141.98},
+        ]
+        
+        total_value = sum(item["quantity"] * item["current_price"] for item in portfolio)
+        total_cost = sum(item["quantity"] * item["avg_price"] for item in portfolio)
+        total_gain_loss = total_value - total_cost
+        total_gain_loss_pct = (total_gain_loss / total_cost) * 100 if total_cost > 0 else 0
+        
+        # Construir respuesta
+        response = ["**Tu Portafolio**"]
+        response.append(f"Valor total: ${total_value:.2f}")
+        response.append(f"Ganancia/Pérdida: ${total_gain_loss:.2f} ({total_gain_loss_pct:+.2f}%)")
+        response.append("\n**Posiciones:**")
+        
+        for item in portfolio:
+            symbol = item["symbol"]
+            qty = item["quantity"]
+            avg_price = item["avg_price"]
+            current_price = item["current_price"]
+            position_value = qty * current_price
+            gain_loss = (current_price - avg_price) * qty
+            gain_loss_pct = ((current_price / avg_price) - 1) * 100
+            
+            position_str = (
+                f"{symbol}: {qty} acciones, "
+                f"Valor: ${position_value:.2f}, "
+                f"G/P: ${gain_loss:.2f} ({gain_loss_pct:+.2f}%)"
+            )
+            response.append(position_str)
+        
+        return "\n".join(response)
+    
+    def _get_cash_info(self) -> str:
+        """
+        Obtiene información del efectivo disponible
+        
+        Returns:
+            Texto con la información del efectivo
+        """
+        # Versión simulada
+        cash_balance = 15432.78
+        buying_power = cash_balance * 2  # Con margen
+        
+        response = [
+            "**Información de Efectivo**",
+            f"Saldo disponible: ${cash_balance:.2f}",
+            f"Poder de compra: ${buying_power:.2f}",
+            "\nPuedes usar este efectivo para realizar nuevas inversiones."
+        ]
+        
+        return "\n".join(response)
+    
+    def _handle_order_intent(self, params: Dict[str, Any]) -> str:
+        """
+        Procesa una intención de orden
+        
+        Args:
+            params: Parámetros de la orden
+            
+        Returns:
+            Texto con la respuesta
+        """
+        symbol = params.get("symbol")
+        action = params.get("action")
+        quantity = params.get("quantity", 1)
+        
+        if not symbol:
+            return "Por favor, especifica un símbolo para la orden (por ejemplo, AAPL, MSFT)."
+        
+        if not action:
+            return f"¿Quieres comprar o vender {symbol}? Por favor, especifica la acción."
+        
+        # Obtener datos de mercado
+        market_data = self.cache.get_market_data(symbol)
+        price = market_data.price if market_data else 100.0  # Precio predeterminado
+        
+        # Simular ejecución de orden
+        order_id = str(uuid.uuid4())[:8]
+        total_value = price * quantity
+        
+        # Construir respuesta
         if action == "BUY":
-            reasoning = (
-                f"Los modelos predictivos indican una tendencia alcista con una proyección de {ensemble_prediction:.2f}%. "
-                f"El análisis técnico muestra patrones de acumulación y soporte en los niveles actuales. "
-                f"Los indicadores de momentum son positivos y el análisis de sentimiento de mercado "
-                f"sugiere un potencial de apreciación a {time_horizon.lower()} plazo."
-            )
-        elif action == "SELL":
-            reasoning = (
-                f"Se detecta una tendencia bajista con una proyección de {ensemble_prediction:.2f}%. "
-                f"Los patrones técnicos muestran señales de distribución y resistencia en los niveles actuales. "
-                f"Los indicadores de momentum están girando a negativos y el análisis de sentimiento "
-                f"sugiere cautela. Se recomienda reducir exposición hasta que los indicadores se estabilicen."
-            )
-        else:  # HOLD
-            reasoning = (
-                f"Los modelos no muestran una señal clara con una proyección de {ensemble_prediction:.2f}%. "
-                f"Hay señales mixtas entre los indicadores técnicos y fundamentales. "
-                f"El sentimiento de mercado es neutral y no hay catalizadores inmediatos identificados. "
-                f"Se recomienda mantener posiciones actuales y reevaluar cuando haya mayor claridad."
-            )
+            response = [
+                f"✅ Orden de compra enviada para {quantity} acciones de {symbol}",
+                f"Precio estimado: ${price:.2f}",
+                f"Valor total: ${total_value:.2f}",
+                f"ID de orden: {order_id}",
+                "\nLa orden se procesará en breve. Puedes consultar su estado más adelante."
+            ]
+        else:  # SELL
+            response = [
+                f"✅ Orden de venta enviada para {quantity} acciones de {symbol}",
+                f"Precio estimado: ${price:.2f}",
+                f"Valor total: ${total_value:.2f}",
+                f"ID de orden: {order_id}",
+                "\nLa orden se procesará en breve. Puedes consultar su estado más adelante."
+            ]
         
-        strategy = BrokerStrategy(
-            symbol=symbol,
-            action=action,
-            confidence=confidence,
-            prediction=ensemble_prediction,
-            reasoning=reasoning,
-            time_horizon=time_horizon,
-            risk_level=risk_level
-        )
+        return "\n".join(response)
+    
+    def _get_risk_metrics(self) -> str:
+        """
+        Obtiene métricas de riesgo del portafolio
         
-        # Guardar en caché
-        self.cache.update_strategy(symbol, strategy)
+        Returns:
+            Texto con las métricas de riesgo
+        """
+        # Valores simulados
+        risk_metrics = {
+            "volatility": 12.4,  # Volatilidad anualizada (%)
+            "var_95": 2.3,       # Value at Risk 95% (%)
+            "beta": 1.05,        # Beta contra el mercado
+            "sharpe": 1.85,      # Ratio de Sharpe
+            "max_drawdown": 8.2  # Máximo drawdown (%)
+        }
         
-        return strategy
+        response = [
+            "**Métricas de Riesgo**",
+            f"Volatilidad anualizada: {risk_metrics['volatility']:.2f}%",
+            f"Value at Risk (95%): {risk_metrics['var_95']:.2f}%",
+            f"Beta: {risk_metrics['beta']:.2f}",
+            f"Ratio de Sharpe: {risk_metrics['sharpe']:.2f}",
+            f"Máximo drawdown: {risk_metrics['max_drawdown']:.2f}%",
+            "\nEstas métricas te ayudan a entender el nivel de riesgo de tu portafolio."
+        ]
+        
+        return "\n".join(response)
+    
+    def _get_market_data(self, symbol: str) -> str:
+        """
+        Obtiene datos de mercado para un símbolo
+        
+        Args:
+            symbol: Símbolo del activo
+            
+        Returns:
+            Texto con datos de mercado
+        """
+        if not symbol:
+            return "Por favor, especifica un símbolo (por ejemplo, AAPL, MSFT)."
+        
+        # Obtener datos de mercado
+        market_data = self.cache.get_market_data(symbol)
+        
+        if not market_data:
+            # Intentar obtener datos en tiempo real
+            try:
+                url = f"https://financialmodelingprep.com/api/v3/quote/{symbol}?apikey={self.fmp_api_key}"
+                response = requests.get(url, timeout=5)
+                
+                if response.status_code == 200:
+                    quotes = response.json()
+                    if quotes and len(quotes) > 0:
+                        quote = quotes[0]
+                        market_data = MarketData(
+                            symbol=quote["symbol"],
+                            price=quote["price"],
+                            change=quote["change"],
+                            volume=quote["volume"],
+                            timestamp=datetime.now().isoformat()
+                        )
+                        self.cache.update_market_data(symbol, market_data)
+            except Exception as e:
+                logger.error(f"Error obteniendo datos de mercado: {e}")
+        
+        # Construir respuesta
+        if market_data:
+            response = [
+                f"**Datos de Mercado: {symbol}**",
+                f"Precio: ${market_data.price:.2f}",
+                f"Cambio diario: {market_data.change:+.2f}%",
+                f"Volumen: {market_data.volume:,}",
+                f"Última actualización: {market_data.timestamp}"
+            ]
+            return "\n".join(response)
+        else:
+            return f"No se pudieron obtener datos para {symbol}. Verifica que el símbolo sea correcto."
+    
+    def _get_predictions(self, symbol: str) -> str:
+        """
+        Obtiene predicciones para un símbolo
+        
+        Args:
+            symbol: Símbolo del activo
+            
+        Returns:
+            Texto con predicciones
+        """
+        if not symbol:
+            return "Por favor, especifica un símbolo (por ejemplo, AAPL, MSFT)."
+        
+        # Obtener predicciones
+        predictions = self.cache.get_predictions(symbol)
+        
+        if not predictions or len(predictions) == 0:
+            # Generar predicción simulada
+            prediction = ModelPrediction(
+                symbol=symbol,
+                prediction=np.random.uniform(-0.2, 0.2),
+                confidence=np.random.uniform(0.5, 0.9),
+                timestamp=datetime.now().isoformat(),
+                model_type="simulado",
+                features={}
+            )
+            self.cache.update_prediction(prediction)
+            predictions = [prediction]
+        
+        # Obtener estrategia
+        strategy = self.cache.get_strategy(symbol)
+        if not strategy:
+            strategy = self._generate_symbol_strategy(symbol)
+            self.cache.update_strategy(symbol, strategy)
+        
+        # Construir respuesta
+        response = [f"**Predicciones para {symbol}**"]
+        
+        for idx, pred in enumerate(predictions):
+            model_type = pred.model_type.capitalize()
+            direction = "alcista" if pred.prediction > 0 else "bajista"
+            response.append(
+                f"Modelo {model_type}: Tendencia {direction} ({pred.prediction:+.2f}), "
+                f"Confianza: {pred.confidence:.2f}"
+            )
+            
+            # Añadir features importantes (hasta 3)
+            if pred.features:
+                features_sorted = sorted(
+                    pred.features.items(), 
+                    key=lambda x: abs(x[1]), 
+                    reverse=True
+                )[:3]
+                
+                features_str = ", ".join(
+                    f"{feature}: {importance:+.2f}" 
+                    for feature, importance in features_sorted
+                )
+                
+                response.append(f"Factores importantes: {features_str}")
+        
+        # Añadir recomendación basada en estrategia
+        response.append(f"\n**Recomendación: {strategy.action}**")
+        response.append(f"Razonamiento: {strategy.reasoning}")
+        response.append(f"Horizonte temporal: {strategy.time_horizon}")
+        response.append(f"Nivel de riesgo: {strategy.risk_level}")
+        
+        return "\n".join(response)
+    
+    def _get_help_info(self) -> str:
+        """
+        Obtiene información de ayuda
+        
+        Returns:
+            Texto con información de ayuda
+        """
+        commands = [
+            ("Estrategia para [símbolo]", "Obtener estrategia de inversión para un activo"),
+            ("Mi portafolio", "Ver tus posiciones actuales"),
+            ("Mi efectivo", "Ver saldo disponible"),
+            ("Comprar [cantidad] acciones de [símbolo]", "Colocar orden de compra"),
+            ("Vender [cantidad] acciones de [símbolo]", "Colocar orden de venta"),
+            ("Riesgo de mi portafolio", "Ver métricas de riesgo"),
+            ("Datos de [símbolo]", "Ver datos de mercado actuales"),
+            ("Predicción para [símbolo]", "Ver predicciones de modelos")
+        ]
+        
+        response = ["**Comandos Disponibles**"]
+        
+        for cmd, desc in commands:
+            response.append(f"• **{cmd}**: {desc}")
+        
+        response.append("\nTambién puedes hacer preguntas generales sobre inversiones y mercados.")
+        
+        return "\n".join(response)
+    
+    def _get_fallback_response(self, message: str) -> str:
+        """
+        Genera una respuesta predeterminada cuando no hay modelo disponible
+        
+        Args:
+            message: Mensaje del usuario
+            
+        Returns:
+            Respuesta predeterminada
+        """
+        # Respuestas generales pre-programadas
+        general_responses = [
+            "Entiendo tu consulta. Para obtener información específica, pregunta por un símbolo como AAPL o MSFT.",
+            "Los mercados financieros son complejos. ¿Hay algún activo específico que te interese?",
+            "Para darte la mejor asesoría, necesito más detalles sobre qué activos te interesan.",
+            "Puedo ayudarte con estrategias de inversión. Prueba a preguntar por un símbolo específico.",
+            "Si buscas recomendaciones, puedes preguntar por 'Estrategia para AAPL' o similar."
+        ]
+        
+        # Seleccionar una respuesta basada en una función hash determinista
+        response_idx = hash(message) % len(general_responses)
+        return general_responses[response_idx]
     
     def shutdown(self):
-        """Libera recursos al apagarse"""
+        """Limpia recursos al apagar el servicio"""
         self.should_run = False
-        if hasattr(self, 'update_thread') and self.update_thread.is_alive():
-            self.update_thread.join(timeout=2.0)
-        
-        if self.model:
-            del self.model
-        
-        if hasattr(self, 'executor'):
+        if self.update_thread and self.update_thread.is_alive():
+            self.update_thread.join(timeout=1.0)
+        if self.executor:
             self.executor.shutdown(wait=False)
-
-# Inicializar el agente como singleton
-llama_agent = LlamaAgent()
-
-def get_llama_agent():
-    """
-    Obtener instancia singleton del agente Llama
-    """
-    return llama_agent
+        logger.info("LlamaAgent apagado correctamente")

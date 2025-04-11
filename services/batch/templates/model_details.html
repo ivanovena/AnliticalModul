@@ -1,0 +1,210 @@
+
+<!DOCTYPE html>
+<html>
+<head>
+    <title>{{ symbol }} - Model Details</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background-color: white;
+            padding: 20px;
+            border-radius: 5px;
+            box-shadow: 0 0 10px rgba(0,0,0,0.1);
+        }
+        h1, h2, h3 {
+            color: #2c3e50;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-bottom: 20px;
+        }
+        th, td {
+            padding: 12px 15px;
+            text-align: left;
+            border-bottom: 1px solid #ddd.
+        }
+        th {
+            background-color: #f2f2f2;
+            font-weight: bold;
+        }
+        tr:hover {
+            background-color: #f5f5f5;
+        }
+        .good {
+            color: green;
+            font-weight: bold;
+        }
+        .bad {
+            color: red;
+            font-weight: bold;
+        }
+        .model-card {
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            padding: 15px;
+            margin-bottom: 20px;
+        }
+        .tabs {
+            display: flex;
+            border-bottom: 1px solid #ddd;
+            margin-bottom: 20px;
+        }
+        .tab {
+            padding: 10px 15px;
+            cursor: pointer;
+            margin-right: 5px;
+        }
+        .tab.active {
+            border: 1px solid #ddd;
+            border-bottom: 1px solid white;
+            border-radius: 5px 5px 0 0;
+            margin-bottom: -1px;
+        }
+        .tab-content {
+            display: none;
+        }
+        .tab-content.active {
+            display: block;
+        }
+        img {
+            max-width: 100%;
+            height: auto;
+        }
+        .btn {
+            padding: 8px 12px;
+            background-color: #3498db;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            text-decoration: none;
+            font-size: 14px;
+            display: inline-block;
+            margin-right: 10px;
+        }
+        .btn:hover {
+            background-color: #2980b9;
+        }
+        .btn-back {
+            background-color: #7f8c8d;
+        }
+        .btn-back:hover {
+            background-color: #95a5a6;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+            <h1>{{ symbol }} - Model Details</h1>
+            <a href="/" class="btn btn-back">Back to Dashboard</a>
+        </div>
+        
+        <div class="model-card">
+            <div class="model-header">
+                <h3>Latest Model: {{ latest_model.best_model }}</h3>
+                <span>Trained on: {{ latest_model.creation_date|replace('T', ' ')|truncate(16, true, '') }}</span>
+            </div>
+            
+            <div class="metrics">
+                <div class="metric">
+                    <p>R²</p>
+                    <p class="value {% if latest_model.metrics.r2 > 0.5 %}good{% elif latest_model.metrics.r2 < 0.2 %}bad{% endif %}">
+                        {{ "%.4f"|format(latest_model.metrics.r2) if latest_model.metrics.r2 is defined else 'N/A' }}
+                    </p>
+                </div>
+                <div class="metric">
+                    <p>MAE</p>
+                    <p class="value">{{ "%.4f"|format(latest_model.metrics.mae) if latest_model.metrics.mae is defined else 'N/A' }}</p>
+                </div>
+                <div class="metric">
+                    <p>RMSE</p>
+                    <p class="value">{{ "%.4f"|format(latest_model.metrics.rmse) if latest_model.metrics.rmse is defined else 'N/A' }}</p>
+                </div>
+            </div>
+        </div>
+        
+        <div class="tabs">
+            <div class="tab active" onclick="openTab(event, 'versions')">Model Versions</div>
+            <div class="tab" onclick="openTab(event, 'features')">Feature Importance</div>
+            <div class="tab" onclick="openTab(event, 'performance')">Performance History</div>
+        </div>
+        
+        <div id="versions" class="tab-content active">
+            <h2>Model Version History</h2>
+            <table>
+                <tr>
+                    <th>Version</th>
+                    <th>Model Type</th>
+                    <th>Training Date</th>
+                    <th>R²</th>
+                    <th>MAE</th>
+                    <th>RMSE</th>
+                    <th>Actions</th>
+                </tr>
+                {% for version in versions %}
+                <tr>
+                    <td>{{ loop.index }}</td>
+                    <td>{{ version.best_model }}</td>
+                    <td>{{ version.creation_date|replace('T', ' ')|truncate(16, true, '') }}</td>
+                    <td class="{% if version.metrics.r2 > 0.5 %}good{% elif version.metrics.r2 < 0.2 %}bad{% endif %}">
+                        {{ "%.4f"|format(version.metrics.r2) if version.metrics.r2 is defined else 'N/A' }}
+                    </td>
+                    <td>{{ "%.4f"|format(version.metrics.mae) if version.metrics.mae is defined else 'N/A' }}</td>
+                    <td>{{ "%.4f"|format(version.metrics.rmse) if version.metrics.rmse is defined else 'N/A' }}</td>
+                    <td>
+                        <a href="/report/{{ symbol }}/{{ version.path }}" class="btn">Report</a>
+                    </td>
+                </tr>
+                {% endfor %}
+            </table>
+        </div>
+        
+        <div id="features" class="tab-content">
+            <h2>Feature Importance</h2>
+            {% if feature_importance_path %}
+                <img src="/static/{{ feature_importance_path }}" alt="Feature Importance">
+            {% else %}
+                <p>No feature importance visualization available for this model.</p>
+            {% endif %}
+        </div>
+        
+        <div id="performance" class="tab-content">
+            <h2>Performance History</h2>
+            <p>Chart with performance metrics over time for different model versions.</p>
+            <!-- Si hubiera un gráfico de rendimiento a través del tiempo, iría aquí -->
+            <p>This feature will be available in future versions.</p>
+        </div>
+    </div>
+    
+    <script>
+        function openTab(evt, tabName) {
+            // Ocultar todos los contenidos de pestañas
+            var tabcontent = document.getElementsByClassName("tab-content");
+            for (var i = 0; i < tabcontent.length; i++) {
+                tabcontent[i].className = tabcontent[i].className.replace(" active", "");
+            }
+            
+            // Desactivar todas las pestañas
+            var tabs = document.getElementsByClassName("tab");
+            for (var i = 0; i < tabs.length; i++) {
+                tabs[i].className = tabs[i].className.replace(" active", "");
+            }
+            
+            // Mostrar el contenido de la pestaña actual y activar la pestaña
+            document.getElementById(tabName).className += " active";
+            evt.currentTarget.className += " active";
+        }
+    </script>
+</body>
+</html>

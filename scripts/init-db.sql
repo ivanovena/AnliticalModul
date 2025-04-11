@@ -3,18 +3,25 @@ CREATE TABLE IF NOT EXISTS market_data (
   id SERIAL PRIMARY KEY,
   symbol VARCHAR(20) NOT NULL,
   datetime TIMESTAMP NOT NULL,
-  open NUMERIC(15,4) NOT NULL,
-  high NUMERIC(15,4) NOT NULL,
-  low NUMERIC(15,4) NOT NULL,
-  close NUMERIC(15,4) NOT NULL,
+  price NUMERIC(15,4),
+  change NUMERIC(15,4),
+  change_percent NUMERIC(15,4),
   volume BIGINT,
+  timestamp BIGINT,
+  data_type VARCHAR(20) NOT NULL,
+  open NUMERIC(15,4),
+  high NUMERIC(15,4),
+  low NUMERIC(15,4),
+  close NUMERIC(15,4),
+  market_cap NUMERIC(18,2),
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-  UNIQUE(symbol, datetime)
+  CONSTRAINT market_data_symbol_datetime_key UNIQUE(symbol, datetime)
 );
 
 -- Create indexes
 CREATE INDEX IF NOT EXISTS idx_market_data_symbol ON market_data(symbol);
 CREATE INDEX IF NOT EXISTS idx_market_data_datetime ON market_data(datetime);
+CREATE INDEX IF NOT EXISTS idx_market_data_data_type ON market_data(data_type);
 
 -- Create table for predictions
 CREATE TABLE IF NOT EXISTS predictions (
@@ -85,20 +92,6 @@ BEGIN
   ORDER BY period_start;
 END;
 $$ LANGUAGE plpgsql;
-
--- Insert some sample data for testing
--- INSERT INTO market_data (symbol, datetime, open, high, low, close, volume)
--- VALUES 
---   ('AAPL', '2023-05-01 09:30:00', 150.0, 151.2, 149.8, 150.5, 1000000),
---   ('AAPL', '2023-05-01 09:31:00', 150.5, 152.0, 150.2, 151.8, 1200000),
---   ('AAPL', '2023-05-01 09:32:00', 151.8, 153.0, 151.5, 152.2, 1100000),
---   ('GOOGL', '2023-05-01 09:30:00', 120.0, 121.5, 119.8, 121.0, 800000),
---   ('GOOGL', '2023-05-01 09:31:00', 121.0, 122.0, 120.5, 121.5, 750000),
---   ('GOOGL', '2023-05-01 09:32:00', 121.5, 122.5, 121.2, 122.0, 820000),
---   ('MSFT', '2023-05-01 09:30:00', 280.0, 282.0, 279.5, 281.5, 500000),
---   ('MSFT', '2023-05-01 09:31:00', 281.5, 283.0, 281.0, 282.5, 480000),
---   ('MSFT', '2023-05-01 09:32:00', 282.5, 284.0, 282.0, 283.8, 520000)
--- ON CONFLICT (symbol, datetime) DO NOTHING;
 
 -- Grant permissions
 GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO current_user;

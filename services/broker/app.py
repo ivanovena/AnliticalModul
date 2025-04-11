@@ -1,18 +1,32 @@
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Depends, Request
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Callable
 import json
 import time
 import logging
 import os
 import atexit
 import random
+import asyncio
 from datetime import datetime, timedelta
 from kafka import KafkaConsumer, KafkaProducer
 import requests
-from llama_agent import ChatMessage, ChatResponse, get_llama_agent
 import threading
 import re
+
+# Importaciones para Redis y el cliente de datos
+from redis_cache import get_redis_cache, close_redis_connection
+from data_client import get_data_client, close_data_client
+
+# Importar nuestro agente LLM
+try:
+    from llama_agent import ChatMessage, ChatResponse, LlamaAgent
+    # Crear instancia global
+    llama_agent = LlamaAgent()
+except ImportError as e:
+    logging.error(f"Error importando LlamaAgent: {e}")
+    llama_agent = None
 
 # Configuración de logging
 logging.basicConfig(
@@ -29,8 +43,12 @@ logger = logging.getLogger("BrokerService")
 KAFKA_BROKER = os.getenv("KAFKA_BROKER", "kafka:9092")
 AGENT_TOPIC = os.getenv("AGENT_TOPIC", "agent_decisions")
 BATCH_TOPIC = os.getenv("BATCH_TOPIC", "batch_events")  # Tópico para actualizaciones de modelos batch
+MARKET_DATA_TOPIC = os.getenv("MARKET_DATA_TOPIC", "market_data")  # Nuevo: Tópico para datos de mercado
 INITIAL_CASH = float(os.getenv("INITIAL_CASH", "100000"))
-FMP_API_KEY = os.getenv("FMP_API_KEY", "h5JPnHPAdjxBAXAGwTOL3Acs3W5zaByx")
+REDIS_HOST = os.getenv("REDIS_HOST", "redis")
+REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
+INGESTION_SERVICE_URL = os.getenv("INGESTION_SERVICE_URL", "http://ingestion:8080")
+STREAMING_SERVICE_URL = os.getenv("STREAMING_SERVICE_URL", "http://streaming:8090")
 
 # Crear aplicación FastAPI
 app = FastAPI(
@@ -49,11 +67,247 @@ def start_app():
 if __name__ == "__main__":
     start_app()
 
-# Inicializar agente Llama como parte del broker
-llama_agent = get_llama_agent()
-
 # Obtener el coordinador de modelos del agente
 model_coordinator = llama_agent.model_coordinator if hasattr(llama_agent, 'model_coordinator') else None
+
+# Inicializar Redis para caché compartida
+try:
+    redis_client = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=0, decode_responses=True)
+    redis_client.ping()  # Verificar conexión
+    logger.info(f"Redis inicializado correctamente en {REDIS_HOST}:{REDIS_PORT}")
+except Exception as e:
+    logger.error(f"Error inicializando Redis: {e}")
+    redis_client = None
+
+# Variable global para la clave de API FMP (será reemplazada por llamadas a ingestion)
+FMP_API_KEY = os.getenv("FMP_API_KEY", "h5JPnHPAdjxBAXAGwTOL3Acs3W5zaByx")
+
+# Cliente de datos para obtener información del servicio de ingestion
+class DataClient:
+    """Cliente para obtener datos del servicio de ingestion y streaming"""
+    
+    def __init__(self, redis_client=None):
+        self.redis_client = redis_client
+        self.ingestion_url = INGESTION_SERVICE_URL
+        self.streaming_url = STREAMING_SERVICE_URL
+        self.cache_ttl = 300  # TTL de caché en segundos (5 minutos)
+    
+    async def get_market_data(self, symbol: str) -> Dict[str, Any]:
+        """
+        Obtiene datos de mercado para un símbolo desde el servicio de ingestion
+        con caché en Redis si está disponible
+        
+        Args:
+            symbol: Símbolo del activo
+            
+        Returns:
+            Datos de mercado
+        """
+        # Primero intentar obtener datos de Redis
+        if self.redis_client:
+            try:
+                redis_key = f"market_data:{symbol}"
+                cached_data = self.redis_client.get(redis_key)
+                if cached_data:
+                    return json.loads(cached_data)
+            except Exception as e:
+                logger.warning(f"Error leyendo caché para {symbol}: {e}")
+        
+        # Si no hay datos en caché, obtener del servicio de ingestion
+        try:
+            url = f"{self.ingestion_url}/market-data/{symbol}"
+            response = await run_in_threadpool(lambda: requests.get(url, timeout=5))
+            
+            if response.status_code == 200:
+                data = response.json()
+                
+                # Guardar en Redis si está disponible
+                if self.redis_client:
+                    try:
+                        self.redis_client.setex(
+                            f"market_data:{symbol}", 
+                            self.cache_ttl, 
+                            json.dumps(data)
+                        )
+                    except Exception as e:
+                        logger.warning(f"Error guardando en caché para {symbol}: {e}")
+                
+                return data
+            else:
+                # Intentar FMP como fallback (temporal hasta que ingestion esté completamente implementado)
+                return await self.get_market_data_fmp(symbol)
+                
+        except Exception as e:
+            logger.warning(f"Error obteniendo datos de ingestion para {symbol}: {e}")
+            # Intentar FMP como fallback
+            return await self.get_market_data_fmp(symbol)
+    
+    async def get_market_data_fmp(self, symbol: str) -> Dict[str, Any]:
+        """
+        Obtiene datos de mercado directamente de FMP (función temporal de fallback)
+        
+        Args:
+            symbol: Símbolo del activo
+            
+        Returns:
+            Datos de mercado
+        """
+        try:
+            url = f"https://financialmodelingprep.com/api/v3/quote/{symbol}?apikey={FMP_API_KEY}"
+            response = await run_in_threadpool(lambda: requests.get(url, timeout=5))
+            
+            if response.status_code == 200:
+                quotes = response.json()
+                if quotes and len(quotes) > 0:
+                    quote = quotes[0]
+                    return {
+                        "symbol": symbol,
+                        "price": quote.get("price", 0),
+                        "change": quote.get("change", 0),
+                        "volume": quote.get("volume", 0),
+                        "timestamp": datetime.now().isoformat(),
+                        "source": "fmp_fallback"
+                    }
+            
+            # Si no hay datos, devolver un diccionario vacío
+            return {}
+            
+        except Exception as e:
+            logger.error(f"Error obteniendo datos de FMP para {symbol}: {e}")
+            return {}
+    
+    async def get_historical_data(self, symbol: str, timeframe: str = "1d", limit: int = 30) -> List[Dict[str, Any]]:
+        """
+        Obtiene datos históricos para un símbolo desde el servicio de ingestion
+        
+        Args:
+            symbol: Símbolo del activo
+            timeframe: Marco temporal (1m, 5m, 15m, 30m, 1h, 4h, 1d)
+            limit: Número máximo de registros
+            
+        Returns:
+            Lista de datos históricos
+        """
+        # Primero intentar obtener datos de Redis
+        if self.redis_client:
+            try:
+                redis_key = f"historical:{symbol}:{timeframe}:{limit}"
+                cached_data = self.redis_client.get(redis_key)
+                if cached_data:
+                    return json.loads(cached_data)
+            except Exception as e:
+                logger.warning(f"Error leyendo caché para históricos de {symbol}: {e}")
+        
+        # Si no hay datos en caché, obtener del servicio de ingestion
+        try:
+            url = f"{self.ingestion_url}/historical/{symbol}?timeframe={timeframe}&limit={limit}"
+            response = await run_in_threadpool(lambda: requests.get(url, timeout=10))
+            
+            if response.status_code == 200:
+                data = response.json()
+                
+                # Guardar en Redis si está disponible
+                if self.redis_client:
+                    try:
+                        # Usar TTL más largo para datos históricos (1 hora)
+                        self.redis_client.setex(
+                            f"historical:{symbol}:{timeframe}:{limit}", 
+                            3600, 
+                            json.dumps(data)
+                        )
+                    except Exception as e:
+                        logger.warning(f"Error guardando en caché para históricos de {symbol}: {e}")
+                
+                return data
+            else:
+                # Intentar FMP como fallback
+                return await self.get_historical_data_fmp(symbol, timeframe, limit)
+                
+        except Exception as e:
+            logger.warning(f"Error obteniendo datos históricos de ingestion para {symbol}: {e}")
+            # Intentar FMP como fallback
+            return await self.get_historical_data_fmp(symbol, timeframe, limit)
+    
+    async def get_historical_data_fmp(self, symbol: str, timeframe: str = "1d", limit: int = 30) -> List[Dict[str, Any]]:
+        """
+        Obtiene datos históricos directamente de FMP (función temporal de fallback)
+        
+        Args:
+            symbol: Símbolo del activo
+            timeframe: Marco temporal (1m, 5m, 15m, 30m, 1h, 4h, 1d)
+            limit: Número máximo de registros
+            
+        Returns:
+            Lista de datos históricos
+        """
+        try:
+            # Mapear timeframe a formato FMP API
+            fmp_timeframe = "1min" if timeframe == "1m" else \
+                           "5min" if timeframe == "5m" else \
+                           "15min" if timeframe == "15m" else \
+                           "30min" if timeframe == "30m" else \
+                           "1hour" if timeframe == "1h" else \
+                           "4hour" if timeframe == "4h" else "1day"
+            
+            url = f"https://financialmodelingprep.com/api/v3/historical-chart/{fmp_timeframe}/{symbol}?apikey={FMP_API_KEY}&limit={limit}"
+            response = await run_in_threadpool(lambda: requests.get(url, timeout=10))
+            
+            if response.status_code == 200:
+                data = response.json()
+                
+                # Formatear datos para que coincidan con lo que espera el frontend
+                formatted_data = []
+                for item in data:
+                    formatted_data.append({
+                        "date": item.get("date"),
+                        "open": float(item.get("open", 0)),
+                        "high": float(item.get("high", 0)),
+                        "low": float(item.get("low", 0)),
+                        "close": float(item.get("close", 0)),
+                        "volume": int(item.get("volume", 0)),
+                        "source": "fmp_fallback"
+                    })
+                
+                return formatted_data
+            
+            # Si no hay datos, devolver una lista vacía
+            return []
+            
+        except Exception as e:
+            logger.error(f"Error obteniendo datos históricos de FMP para {symbol}: {e}")
+            return []
+    
+    async def get_streaming_prediction(self, symbol: str) -> Dict[str, Any]:
+        """
+        Obtiene predicción en tiempo real para un símbolo desde el servicio de streaming
+        
+        Args:
+            symbol: Símbolo del activo
+            
+        Returns:
+            Predicción del modelo
+        """
+        try:
+            url = f"{self.streaming_url}/prediction/{symbol}"
+            response = await run_in_threadpool(lambda: requests.get(url, timeout=3))
+            
+            if response.status_code == 200:
+                return response.json()
+            
+            return {"prediction": 0, "confidence": 0, "direction": "neutral"}
+            
+        except Exception as e:
+            logger.warning(f"Error obteniendo predicción de streaming para {symbol}: {e}")
+            return {"prediction": 0, "confidence": 0, "direction": "neutral"}
+
+# Función para ejecutar código en thread pool
+async def run_in_threadpool(func):
+    """Ejecuta una función bloqueante en un thread pool"""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, func)
+
+# Instanciar el cliente de datos como dependencia
+data_client = DataClient(redis_client)
 
 # Función para procesar actualizaciones de modelos batch
 def process_batch_model_update(event):
@@ -257,21 +511,27 @@ async def health_check():
 async def get_symbols():
     """Obtener lista de todos los símbolos disponibles"""
     try:
-        # Lista de símbolos utilizados en el servicio de ingestion
-        ingestion_symbols = [
-            "AAPL", "GOOGL", "MSFT", "AMZN", "TSLA", 
-            "META", "NVDA", "NFLX", "INTC", "AMD",
-            "IAG.MC", "PHM.MC", "AENA.MC", "BA", 
-            "CAR", "DLTR", "SASA.IS"
-        ]
+        # Obtener el cliente de datos
+        data_client_instance = get_data_client()
         
-        # Obtener símbolos de la caché del agente
-        agent_symbols = llama_agent.cache.get_all_symbols() or []
+        # Obtener símbolos (con caché en Redis)
+        symbols = await data_client_instance.get_symbols()
         
-        # Combinar ambas listas sin duplicados
-        all_symbols = list(set(ingestion_symbols + agent_symbols))
-            
-        return {"symbols": all_symbols}
+        # Si no tenemos símbolos, intentar obtener desde el agente
+        if not symbols and llama_agent:
+            agent_symbols = llama_agent.cache.get_all_symbols() or []
+            symbols = agent_symbols
+        
+        # Si aún no tenemos símbolos, usar una lista por defecto
+        if not symbols:
+            symbols = [
+                "AAPL", "GOOGL", "MSFT", "AMZN", "TSLA", 
+                "META", "NVDA", "NFLX", "INTC", "AMD",
+                "IAG.MC", "PHM.MC", "AENA.MC", "BA", 
+                "CAR", "DLTR", "SASA.IS"
+            ]
+        
+        return {"symbols": symbols}
     except Exception as e:
         logger.error(f"Error obteniendo símbolos: {e}")
         raise HTTPException(status_code=500, detail=f"Error interno: {str(e)}")
@@ -279,7 +539,6 @@ async def get_symbols():
 @app.get("/portfolio")
 async def get_portfolio():
     """Obtener el estado actual del portafolio"""
-    # Actualizar precios actuales en posiciones
     await update_portfolio_prices()
     
     # Calcular y agregar métricas adicionales al portfolio
@@ -460,52 +719,50 @@ async def update_portfolio_prices():
     if not positions:
         return
     
-    # Obtener precios actuales
-    symbols = list(positions.keys())
-    try:
-        symbols_str = ",".join(symbols)
-        url = f"https://financialmodelingprep.com/api/v3/quote/{symbols_str}?apikey={FMP_API_KEY}"
-        response = requests.get(url, timeout=10)
-        
-        if response.status_code == 200:
-            quotes = response.json()
-            # Crear diccionario para búsqueda rápida
-            quotes_dict = {quote["symbol"]: quote for quote in quotes}
+    # Obtener precios actuales usando el cliente de datos
+    data_client_instance = get_data_client()
+    total_market_value = 0
+    
+    for symbol, position in positions.items():
+        try:
+            # Obtener datos de mercado con caché en Redis
+            market_data = await data_client_instance.get_market_data(symbol)
             
-            # Actualizar posiciones
-            total_market_value = 0
-            for symbol, position in positions.items():
-                if symbol in quotes_dict:
-                    quote = quotes_dict[symbol]
-                    position["current_price"] = quote["price"]
-                    position["market_value"] = position["quantity"] * quote["price"]
-                    
-                    # Calcular ganancia/pérdida actual
-                    position["current_profit"] = position["market_value"] - (position["avg_cost"] * position["quantity"])
-                    position["profit_percent"] = (position["current_profit"] / (position["avg_cost"] * position["quantity"])) * 100 if position["avg_cost"] > 0 else 0
+            if market_data and "price" in market_data:
+                position["current_price"] = market_data["price"]
+                position["market_value"] = position["quantity"] * market_data["price"]
                 
-                total_market_value += position["market_value"]
+                # Calcular ganancia/pérdida actual
+                position["current_profit"] = position["market_value"] - (position["avg_cost"] * position["quantity"])
+                position["profit_percent"] = (position["current_profit"] / (position["avg_cost"] * position["quantity"])) * 100 if position["avg_cost"] > 0 else 0
             
-            # Actualizar valor total del portafolio
-            broker_state["portfolio"]["total_value"] = broker_state["portfolio"]["cash"] + total_market_value
-            broker_state["portfolio"]["last_update"] = time.time()
-            
-            logger.info(f"Precios del portafolio actualizados. Valor total: {broker_state['portfolio']['total_value']}")
-        else:
-            logger.warning(f"No se pudieron actualizar los precios. Código de estado: {response.status_code}")
-    except Exception as e:
-        logger.error(f"Error actualizando precios: {e}")
+            total_market_value += position["market_value"]
+        except Exception as e:
+            logger.error(f"Error actualizando precio para {symbol}: {e}")
+    
+    # Actualizar valor total del portafolio
+    broker_state["portfolio"]["total_value"] = broker_state["portfolio"]["cash"] + total_market_value
+    broker_state["portfolio"]["last_update"] = time.time()
+    
+    logger.info(f"Precios del portafolio actualizados. Valor total: {broker_state['portfolio']['total_value']}")
 
 async def get_stock_prediction(symbol):
     """Obtener predicción para una acción específica"""
     try:
-        # Obtener predicciones desde el agente o usar el módulo market_utils
-        # Aquí podemos usar la función _get_predictions del agente llama o implementar algo básico
-        # Por simplicidad, devolvemos una predicción básica
-        from market_utils import get_market_analyzer
-        analyzer = get_market_analyzer()
-        prediction = analyzer.get_price_prediction(symbol)
-        return prediction
+        # Usar el cliente de datos para obtener predicciones
+        data_client_instance = get_data_client()
+        prediction = await data_client_instance.get_streaming_prediction(symbol)
+        
+        # Formatear respuesta
+        formatted_prediction = {
+            "symbol": symbol,
+            "prediction": prediction.get("prediction", 0),
+            "confidence": prediction.get("confidence", 0), 
+            "direction": prediction.get("direction", "neutral"),
+            "factors": prediction.get("factors", [])
+        }
+        
+        return formatted_prediction
     except Exception as e:
         logger.error(f"Error obteniendo predicción para {symbol}: {e}")
         return {"prediction": 0, "confidence": 0, "direction": "neutral", "factors": []}
@@ -690,58 +947,62 @@ async def get_market_data(symbol: str):
     Obtener datos de mercado actualizados para un símbolo
     """
     try:
-        # Primero intentamos obtener datos de mercado desde el agente
-        market_data_response = llama_agent._get_market_data(symbol)
+        # Obtener el cliente de datos
+        data_client_instance = get_data_client()
         
-        if not market_data_response or "No pude obtener datos" in market_data_response:
-            # Si el agente no tiene datos, intentamos obtenerlos desde la API
-            try:
-                url = f"https://financialmodelingprep.com/api/v3/quote/{symbol}?apikey={FMP_API_KEY}"
-                response = requests.get(url, timeout=10)
-                
-                if response.status_code == 200:
-                    data = response.json()
-                    if data and len(data) > 0:
-                        quote = data[0]
-                        return {
-                            "symbol": symbol,
-                            "price": quote.get('price', 0),
-                            "change": quote.get('change', 0),
-                            "percentChange": quote.get('changesPercentage', 0),
-                            "volume": quote.get('volume', 0),
-                            "timestamp": datetime.now().isoformat()
-                        }
-            except Exception as e:
-                logger.error(f"Error obteniendo datos de mercado para {symbol} desde API: {e}")
-            
-            # Si aún no hay datos, lanzamos la excepción
+        # Obtener datos de mercado (con caché en Redis)
+        market_data = await data_client_instance.get_market_data(symbol)
+        
+        if not market_data:
+            # Si no hay datos disponibles
             raise HTTPException(status_code=404, detail=f"No hay datos disponibles para {symbol}")
         
-        # El market_data_response es un string, no un diccionario, por lo que no podemos usar get()
-        # Devolvemos una respuesta JSON estructurada
-        return {
-            "symbol": symbol,
-            "data": market_data_response,
-            "timestamp": datetime.now().isoformat()
-        }
-    except HTTPException: # Deja pasar las excepciones HTTP (como 404)
+        # Devolver datos formateados
+        return market_data
+    except HTTPException:
+        # Deja pasar las excepciones HTTP (como 404)
         raise
-    except Exception as e: # Captura otros errores inesperados
+    except Exception as e:
+        # Captura otros errores inesperados
         logger.error(f"Error inesperado en get_market_data para {symbol}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Error interno inesperado al procesar {symbol}")
 
 @app.get("/predictions/{symbol}")
 async def get_predictions(symbol: str):
     """
-    Obtener predicciones y estrategias para un símbolo
+    Obtener predicciones para un símbolo
     """
-    # Obtener predicciones desde el agente
-    predictions_response = llama_agent._get_predictions(symbol)
-    
-    if not predictions_response or "No pude obtener" in predictions_response:
-        raise HTTPException(status_code=404, detail=f"No hay predicciones disponibles para {symbol}")
-    
-    return {"symbol": symbol, "predictions": predictions_response}
+    try:
+        # Obtener el cliente de datos
+        data_client_instance = get_data_client()
+        
+        # Obtener predicción de streaming (con caché en Redis)
+        prediction = await data_client_instance.get_streaming_prediction(symbol)
+        
+        if not prediction or 'prediction' not in prediction:
+            # Intentar obtener desde el agente como fallback
+            agent_prediction = llama_agent._get_predictions(symbol) if llama_agent else None
+            
+            if not agent_prediction or "No pude obtener" in agent_prediction:
+                raise HTTPException(status_code=404, detail=f"No hay predicciones disponibles para {symbol}")
+            
+            return {"symbol": symbol, "predictions": agent_prediction, "source": "agent"}
+        
+        # Formatear respuesta
+        return {
+            "symbol": symbol,
+            "prediction": prediction.get("prediction", 0),
+            "confidence": prediction.get("confidence", 0),
+            "direction": prediction.get("direction", "neutral"),
+            "timestamp": prediction.get("timestamp", datetime.now().isoformat()),
+            "source": prediction.get("source", "streaming")
+        }
+    except HTTPException:
+        # Deja pasar las excepciones HTTP
+        raise
+    except Exception as e:
+        logger.error(f"Error obteniendo predicciones para {symbol}: {e}")
+        raise HTTPException(status_code=500, detail=f"Error interno: {str(e)}")
 
 @app.get("/strategy/{symbol}")
 async def get_strategy(symbol: str):
@@ -803,47 +1064,25 @@ async def get_strategy(symbol: str):
         raise HTTPException(status_code=500, detail=f"Error interno: {str(e)}")
 
 @app.get("/historical/{symbol}")
-async def get_historical_data(symbol: str, timeframe: str = "1d"):
+async def get_historical_data(symbol: str, timeframe: str = "1d", limit: int = 30):
     """
     Obtener datos históricos para un símbolo
     """
     try:
-        # Mapear timeframe a formato FMP API
-        fmp_timeframe = "1min" if timeframe == "1m" else \
-                       "5min" if timeframe == "5m" else \
-                       "15min" if timeframe == "15m" else \
-                       "30min" if timeframe == "30m" else \
-                       "1hour" if timeframe == "1h" else \
-                       "4hour" if timeframe == "4h" else "1day"
+        # Obtener el cliente de datos
+        data_client_instance = get_data_client()
         
-        # Determinar límite según timeframe
-        limit = 60 if timeframe in ["1m", "5m", "15m"] else \
-               48 if timeframe == "30m" else \
-               24 if timeframe == "1h" else \
-               30 if timeframe == "4h" else 30
+        # Obtener datos históricos (con caché en Redis)
+        historical_data = await data_client_instance.get_historical_data(symbol, timeframe, limit)
         
-        url = f"https://financialmodelingprep.com/api/v3/historical-chart/{fmp_timeframe}/{symbol}?apikey={FMP_API_KEY}&limit={limit}"
-        response = requests.get(url, timeout=15)
+        if not historical_data:
+            # Si no hay datos disponibles
+            raise HTTPException(status_code=404, detail=f"No hay datos históricos disponibles para {symbol}")
         
-        if response.status_code != 200:
-            logger.error(f"Error API FMP: {response.status_code}, {response.text}")
-            raise HTTPException(status_code=response.status_code, detail="Error obteniendo datos históricos")
-        
-        data = response.json()
-        
-        # Formatear datos para que coincidan con lo que espera el frontend
-        formatted_data = []
-        for item in data:
-            formatted_data.append({
-                "date": item.get("date"),
-                "open": float(item.get("open", 0)),
-                "high": float(item.get("high", 0)),
-                "low": float(item.get("low", 0)),
-                "close": float(item.get("close", 0)),
-                "volume": int(item.get("volume", 0))
-            })
-        
-        return formatted_data
+        return historical_data
+    except HTTPException:
+        # Deja pasar las excepciones HTTP
+        raise
     except Exception as e:
         logger.error(f"Error obteniendo datos históricos para {symbol}: {e}")
         raise HTTPException(status_code=500, detail=f"Error interno: {str(e)}")
@@ -932,6 +1171,20 @@ async def get_model_status():
 async def shutdown_event():
     """Limpiar recursos al cerrar"""
     logger.info("Deteniendo servicio de broker...")
+    
+    # Cerrar cliente de datos
+    try:
+        await close_data_client()
+        logger.info("Cliente de datos cerrado correctamente")
+    except Exception as e:
+        logger.error(f"Error cerrando cliente de datos: {e}")
+    
+    # Cerrar conexión Redis
+    try:
+        close_redis_connection()
+        logger.info("Conexión Redis cerrada correctamente")
+    except Exception as e:
+        logger.error(f"Error cerrando conexión Redis: {e}")
     
     # Cerrar agente Llama
     if llama_agent:

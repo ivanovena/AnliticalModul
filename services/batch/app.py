@@ -37,7 +37,7 @@ logger = logging.getLogger("BatchService")
 
 # Initialize SQLAlchemy engine with connection pooling
 try:
-    # Forzar la conexión a postgres:5432 en lugar de usar DB_URI directamente
+    # Forzar la conexión a postgres:5432 con los parámetros correctos
     postgres_host = os.getenv("POSTGRES_HOST", "postgres")
     postgres_port = os.getenv("POSTGRES_PORT", "5432")
     postgres_user = os.getenv("POSTGRES_USER", "market_admin")
@@ -600,21 +600,45 @@ def train_models(df: pd.DataFrame, symbol: str) -> dict:
 
 def save_model(model_data: Dict[str, Any], symbol: str) -> str:
     """
-    Save trained model and metadata to disk
+    Save trained model and metadata to disk with improved organization
     """
     try:
         if not model_data or not model_data.get("best_model"):
             logger.warning(f"No best model found for {symbol}")
             return ""
         
-        model_dir = os.path.join(MODEL_OUTPUT_PATH, symbol)
+        # Crear una estructura de directorios más organizada por fecha
+        current_date = datetime.datetime.now().strftime('%Y%m%d')
+        model_dir = os.path.join(MODEL_OUTPUT_PATH, symbol, current_date)
         os.makedirs(model_dir, exist_ok=True)
         
-        model_path = os.path.join(model_dir, f"{symbol}_model.pkl")
+        # Guardar el modelo con versión en el nombre
+        model_version = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+        model_path = os.path.join(model_dir, f"{symbol}_model_{model_version}.pkl")
         
         if "model_object" in model_data and model_data["model_object"] is not None:
             # Save model file
             joblib.dump(model_data["model_object"], model_path)
+            
+            # Guardar metadata extendida
+            metadata_path = os.path.join(model_dir, f"{symbol}_metadata_{model_version}.json")
+            
+            # Eliminar el objeto del modelo que no se puede serializar
+            metadata = {k: v for k, v in model_data.items() if k != "model_object"}
+            metadata["model_path"] = model_path
+            metadata["model_version"] = model_version
+            metadata["creation_date"] = datetime.datetime.now().isoformat()
+            
+            with open(metadata_path, 'w') as f:
+                json.dump(metadata, f, indent=4)
+            
+            # Crear un symlink al último modelo para fácil acceso
+            latest_path = os.path.join(MODEL_OUTPUT_PATH, symbol, f"{symbol}_latest_model.pkl")
+            if os.path.exists(latest_path):
+                os.remove(latest_path)
+            os.symlink(model_path, latest_path)
+            
+            logger.info(f"Model and metadata saved for {symbol} in {model_dir}")
             
             # Publish model update to Kafka
             result = publish_model_update(symbol, model_path, model_data)
@@ -931,6 +955,105 @@ def generate_model_report(symbol: str, model_data: Dict[str, Any], evaluation: D
         logger.error(f"Error generating model report for {symbol}: {e}")
         return ""
 
+def create_model_registry(model_output_path: str) -> None:
+    """
+    Crea un registro central de todos los modelos entrenados para facilitar el seguimiento
+    """
+    registry_path = os.path.join(model_output_path, "model_registry.json")
+    
+    try:
+        # Verificar si ya existe el registro
+        if os.path.exists(registry_path):
+            with open(registry_path, 'r') as f:
+                registry = json.load(f)
+        else:
+            # Crear registro nuevo
+            registry = {
+                "last_updated": datetime.datetime.now().isoformat(),
+                "models": {}
+            }
+            
+        # Actualizar la fecha de última actualización
+        registry["last_updated"] = datetime.datetime.now().isoformat()
+        
+        # Buscar todos los directorios de símbolos
+        symbol_dirs = [d for d in os.listdir(model_output_path) 
+                      if os.path.isdir(os.path.join(model_output_path, d)) and d != "logs"]
+        
+        # Para cada símbolo, buscar modelos y metadatos
+        for symbol in symbol_dirs:
+            symbol_path = os.path.join(model_output_path, symbol)
+            
+            # Inicializar el registro del símbolo si no existe
+            if symbol not in registry["models"]:
+                registry["models"][symbol] = {
+                    "versions": [],
+                    "latest_version": None
+                }
+            
+            # Buscar archivos de modelo (.pkl)
+            model_files = []
+            for root, _, files in os.walk(symbol_path):
+                for file in files:
+                    if file.endswith("_model.pkl") or (file.endswith(".pkl") and "model" in file):
+                        model_path = os.path.join(root, file)
+                        metadata_path = model_path.replace(".pkl", "_metadata.json")
+                        
+                        # Verificar si existe el archivo de metadatos
+                        if os.path.exists(metadata_path):
+                            with open(metadata_path, 'r') as f:
+                                model_metadata = json.load(f)
+                        else:
+                            model_metadata = {
+                                "model_path": model_path,
+                                "creation_date": datetime.datetime.fromtimestamp(
+                                    os.path.getmtime(model_path)
+                                ).isoformat()
+                            }
+                        
+                        # Agregar información del modelo
+                        model_info = {
+                            "path": model_path,
+                            "creation_date": model_metadata.get("creation_date", 
+                                              datetime.datetime.fromtimestamp(
+                                                  os.path.getmtime(model_path)
+                                              ).isoformat()),
+                            "metadata_path": metadata_path if os.path.exists(metadata_path) else None,
+                            "best_model": model_metadata.get("best_model", "unknown"),
+                            "metrics": model_metadata.get("metrics", {})
+                        }
+                        
+                        # Verificar si este modelo ya está en el registro
+                        model_registered = False
+                        for v in registry["models"][symbol]["versions"]:
+                            if v["path"] == model_path:
+                                # Actualizar la información existente
+                                v.update(model_info)
+                                model_registered = True
+                                break
+                                
+                        if not model_registered:
+                            registry["models"][symbol]["versions"].append(model_info)
+            
+            # Ordenar versiones por fecha de creación (más recientes primero)
+            registry["models"][symbol]["versions"].sort(
+                key=lambda x: x["creation_date"], 
+                reverse=True
+            )
+            
+            # Actualizar última versión
+            if registry["models"][symbol]["versions"]:
+                registry["models"][symbol]["latest_version"] = registry["models"][symbol]["versions"][0]["path"]
+        
+        # Guardar el registro actualizado
+        with open(registry_path, 'w') as f:
+            json.dump(registry, f, indent=4)
+            
+        logger.info(f"Registro de modelos actualizado en {registry_path}")
+        
+    except Exception as e:
+        logger.error(f"Error al crear/actualizar el registro de modelos: {e}")
+
 def main():
     """
     Main function to orchestrate the batch training process
@@ -998,6 +1121,9 @@ def main():
     
     # Close Kafka producer properly
     producer.close()
+    
+    # Crear/actualizar el registro de modelos
+    create_model_registry(MODEL_OUTPUT_PATH)
 
 if __name__ == "__main__":
     main()

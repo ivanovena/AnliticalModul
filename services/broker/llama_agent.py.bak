@@ -1,0 +1,536 @@
+# llama_agent.py
+import os
+import json
+import logging
+import time
+from datetime import datetime
+import uuid
+import re
+import numpy as np
+import pickle
+from pydantic import BaseModel
+import traceback
+from typing import Dict, List, Any, Optional, Tuple, Union
+import threading
+import requests
+from fastapi import HTTPException
+import concurrent.futures
+
+# Configuración para usar menos memoria con Llama
+os.environ["LLAMA_CPP_ENABLE_MLOCK"] = "0"  # Desactivar bloqueo de memoria
+os.environ["LLAMA_CPP_MAX_BATCH_SIZE"] = "8"  # Limitar tamaño de batch
+os.environ["LLAMA_CPP_SEED"] = "42"  # Seed para reproducibilidad
+
+# Importación condicional de Llama
+try:
+    from llama_cpp import Llama
+    LLAMA_AVAILABLE = True
+except ImportError:
+    LLAMA_AVAILABLE = False
+    logging.warning("llama-cpp-python no está disponible. Usando respuestas predefinidas.")
+
+# Configuración de logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.FileHandler("broker_service.log"),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger("LlamaAgent")
+
+# Modelo de datos para el chat
+class ChatMessage(BaseModel):
+    message: str
+    conversation_id: Optional[str] = None
+
+class ChatResponse(BaseModel):
+    response: str
+    conversation_id: str
+
+class ConversationHistory(BaseModel):
+    messages: List[Dict[str, Any]] = []
+    metadata: Dict[str, Any] = {}
+
+class BrokerStrategy(BaseModel):
+    """Modelo para representar estrategias de trading"""
+    symbol: str
+    action: str  # BUY, SELL, HOLD
+    confidence: float
+    prediction: float
+    reasoning: str
+    time_horizon: str  # SHORT, MEDIUM, LONG
+    risk_level: str    # LOW, MODERATE, HIGH
+
+class MarketData(BaseModel):
+    """Modelo para datos de mercado"""
+    symbol: str
+    price: float
+    change: float
+    volume: int
+    timestamp: str
+    
+class ModelPrediction(BaseModel):
+    """Modelo para predicciones de modelos de ML"""
+    symbol: str
+    prediction: float
+    confidence: float
+    timestamp: str
+    model_type: str
+    features: Dict[str, float] = {}
+
+class OrderRequest(BaseModel):
+    """Modelo para solicitudes de órdenes"""
+    symbol: str
+    action: str  # BUY, SELL
+    quantity: int
+    price: float
+    
+# Caché para datos de mercado y predicciones
+class ModelCache:
+    def __init__(self):
+        self.market_data = {}  # symbol -> MarketData
+        self.predictions = {}  # symbol -> List[ModelPrediction]
+        self.strategies = {}   # symbol -> BrokerStrategy
+        self.last_update = {}  # symbol -> timestamp
+        self.lock = threading.RLock()
+        
+    def update_market_data(self, symbol: str, data: MarketData):
+        """Actualiza datos de mercado para un símbolo"""
+        with self.lock:
+            self.market_data[symbol] = data
+            self.last_update[symbol] = datetime.now()
+            
+    def update_prediction(self, prediction: ModelPrediction):
+        """Actualiza predicciones para un símbolo"""
+        with self.lock:
+            symbol = prediction.symbol
+            if symbol not in self.predictions:
+                self.predictions[symbol] = []
+            
+            # Agregar nueva predicción y mantener solo las 5 más recientes
+            self.predictions[symbol].append(prediction)
+            self.predictions[symbol] = self.predictions[symbol][-5:]
+            self.last_update[symbol] = datetime.now()
+    
+    def update_strategy(self, symbol: str, strategy: BrokerStrategy):
+        """Actualiza estrategia para un símbolo"""
+        with self.lock:
+            self.strategies[symbol] = strategy
+            self.last_update[symbol] = datetime.now()
+    
+    def get_market_data(self, symbol: str) -> Optional[MarketData]:
+        """Obtiene datos de mercado para un símbolo"""
+        with self.lock:
+            return self.market_data.get(symbol)
+    
+    def get_predictions(self, symbol: str) -> List[ModelPrediction]:
+        """Obtiene predicciones para un símbolo"""
+        with self.lock:
+            return self.predictions.get(symbol, [])
+    
+    def get_strategy(self, symbol: str) -> Optional[BrokerStrategy]:
+        """Obtiene estrategia para un símbolo"""
+        with self.lock:
+            return self.strategies.get(symbol)
+    
+    def get_all_symbols(self) -> List[str]:
+        """Obtiene todos los símbolos con datos"""
+        with self.lock:
+            # Unión de todos los símbolos en caché
+            all_symbols = set(self.market_data.keys()) | set(self.predictions.keys()) | set(self.strategies.keys())
+            return list(all_symbols)
+
+class LlamaAgent:
+    """Agente de chat basado en Llama para el broker"""
+    
+    def __init__(self, model_path: Optional[str] = None):
+        """
+        Inicializa el agente Llama
+        
+        Args:
+            model_path: Ruta al modelo Llama (GGUF) o nombre del modelo en HF
+        """
+        self.conversations = {}  # Almacena el historial de conversaciones
+        self.model = None
+        self.model_path = model_path or os.getenv("LLAMA_MODEL_PATH", "models/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf")
+        self.cache = ModelCache()  # Caché para datos y predicciones
+        self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)  # Para operaciones asíncronas
+        self.fmp_api_key = os.getenv("FMP_API_KEY", "h5JPnHPAdjxBAXAGwTOL3Acs3W5zaByx")
+        
+        logger.info(f"Inicializando LlamaAgent con modelo {self.model_path}")
+        
+        try:
+            # Importar coordinador de modelos ensemble
+            from model_coordination import get_model_ensemble_coordinator
+            self.model_coordinator = get_model_ensemble_coordinator()
+            logger.info("Coordinador de modelos ensemble inicializado")
+        except Exception as e:
+            logger.error(f"Error importando coordinador de modelos: {e}")
+            self.model_coordinator = None
+        
+        try:
+            # Inicializar modelo Llama optimizado para 64GB RAM (M2 Ultra)
+            if LLAMA_AVAILABLE:
+                # Configuración para usar DeepSeek-Coder 33B en M2 Ultra con 64GB
+                deepseek_path = os.path.join(os.path.dirname(self.model_path), "deepseek-coder-33b-instruct.gguf")
+                
+                # Verificar si existe el modelo localmente
+                if os.path.exists("/Users/ivangodo/.ollama/models/blobs"):
+                    logger.info("Detectado Ollama. Intentando usar modelo DeepSeek-Coder 33B local")
+                    
+                    # Configuración para usar Ollama
+                    try:
+                        # Importar nuestro cliente de Ollama personalizado
+                        from ollama_client import get_ollama_client
+                        
+                        # Obtener instancia del cliente
+                        ollama_client = get_ollama_client()
+                        
+                        # Función para enviar consultas a Ollama
+                        def generate_with_ollama(prompt, max_tokens=512, model="deepseek-coder:33b"):
+                            try:
+                                options = {
+                                    "num_predict": max_tokens,
+                                    "temperature": 0.7
+                                }
+                                
+                                # Sistema prompt para mejorar rendimiento con DeepSeek-Coder
+                                system_prompt = (
+                                    "Eres un asistente financiero especializado en trading algorítmico. "
+                                    "Proporciona análisis de mercado, estrategias de inversión y recomendaciones "
+                                    "basadas en modelos de machine learning. Tu objetivo es ayudar a los usuarios "
+                                    "a tomar decisiones financieras informadas y efectivas."
+                                )
+                                
+                                # Usar chat completion para modelos nuevos
+                                if model in ["phi4:latest", "gemma3:27b"]:
+                                    messages = [
+                                        {"role": "system", "content": system_prompt},
+                                        {"role": "user", "content": prompt}
+                                    ]
+                                    response = ollama_client.chat_completion(
+                                        model=model, 
+                                        messages=messages,
+                                        options=options
+                                    )
+                                    return {"response": response.get("message", {}).get("content", "")}
+                                else:
+                                    # Usar generate para otros modelos
+                                    response = ollama_client.generate(
+                                        model=model,
+                                        prompt=prompt,
+                                        system=system_prompt,
+                                        options=options
+                                    )
+                                    return response
+                            except Exception as e:
+                                logger.error(f"Error con Ollama: {e}")
+                                return {"response": "Error generando respuesta con el modelo."}
+                        
+                        # Probar la conexión
+                        test_response = generate_with_ollama("Hello, world", max_tokens=10)
+                        if test_response and "response" in test_response:
+                            logger.info("Conexión con Ollama establecida correctamente")
+                            
+                            # Crear un wrapper compatible con la interfaz esperada
+                            class OllamaWrapper:
+                                def __init__(self, model_name="deepseek-coder:33b"):
+                                    self.model_name = model_name
+                                
+                                def __call__(self, prompt, max_tokens=512, stop=None, temperature=0.7, repeat_penalty=1.1):
+                                    response = generate_with_ollama(
+                                        prompt=prompt, 
+                                        max_tokens=max_tokens,
+                                        model=self.model_name
+                                    )
+                                    # Formatear respuesta para compatibilidad
+                                    return {
+                                        "choices": [
+                                            {
+                                                "text": response.get("response", "")
+                                            }
+                                        ]
+                                    }
+                            
+                            # Usar el wrapper como modelo
+                            self.model = OllamaWrapper("deepseek-coder:33b")
+                            logger.info("Modelo DeepSeek-Coder 33B cargado desde Ollama")
+                        else:
+                            logger.warning("No se pudo conectar con Ollama")
+                    except ImportError as e:
+                        logger.warning(f"No se pudo importar la librería de cliente de Ollama: {e}. Intentando cargar modelo directo.")
+                
+                # Si no se pudo usar Ollama, intentar cargar el modelo directamente
+                if self.model is None and os.path.exists(deepseek_path):
+                    # Cargar DeepSeek-Coder 33B directamente con llamacpp
+                    logger.info(f"Cargando modelo DeepSeek-Coder 33B: {deepseek_path}")
+                    self.model = Llama(
+                        model_path=deepseek_path,
+                        n_ctx=4096,        # Contexto mayor para análisis financieros complejos
+                        n_batch=128,       # Mayor batch para M2 Ultra
+                        n_gpu_layers=-1,   # Usar todas las capas en GPU
+                        use_mlock=True,    # Bloquear en memoria con 64GB disponibles
+                        seed=42            # Reproducibilidad
+                    )
+                    logger.info(f"Modelo DeepSeek-Coder 33B cargado correctamente")
+                elif self.model is None and os.path.exists(self.model_path):
+                    # Si es un archivo local GGUF
+                    logger.info(f"Cargando modelo local: {self.model_path}")
+                    self.model = Llama(
+                        model_path=self.model_path,
+                        n_ctx=4096,        # Contexto mayor
+                        n_batch=64,        # Batch moderado
+                        n_gpu_layers=-1,   # Usar todas las capas en GPU
+                        use_mlock=True,    # Bloquear en memoria
+                        seed=42            # Reproducibilidad
+                    )
+                    logger.info(f"Modelo Llama cargado desde {self.model_path}")
+                elif self.model is None:
+                    # Intentar con otro modelo disponible localmente
+                    try:
+                        logger.info("Intentando usar modelo Phi-4 como alternativa")
+                        self.model = OllamaWrapper("phi4:latest")
+                        logger.info("Modelo Phi-4 cargado desde Ollama")
+                    except Exception as e:
+                        logger.error(f"Error cargando modelo alternativo: {e}")
+                        self.model = None
+            else:
+                logger.warning("llama-cpp-python no está disponible. Usando respuestas predefinidas.")
+                self.model = None
+                
+        except Exception as e:
+            logger.error(f"Error inicializando el modelo Llama: {traceback.format_exc()}")
+            self.model = None
+            logger.info("Usando respuestas pre-programadas como fallback")
+
+        # Iniciar thread de actualización de datos de mercado
+        self.should_run = True
+        self.update_thread = threading.Thread(target=self._update_market_data_periodically)
+        self.update_thread.daemon = True
+        self.update_thread.start()
+        
+        # Cargar estrategias iniciales
+        self._load_initial_strategies()
+
+    def _load_initial_strategies(self):
+        """Carga estrategias iniciales para símbolos comunes"""
+        common_symbols = ["AAPL", "MSFT", "GOOG", "AMZN", "TSLA", 
+                         "IAG.MC", "PHM.MC", "BKY.MC", "AENA.MC", "BA", 
+                         "NLGO", "CAR", "DLTR", "CANTE.IS", "SASA.IS"]
+        
+        for symbol in common_symbols:
+            # Crear estrategia simulada para cada símbolo
+            strategy = self._generate_symbol_strategy(symbol)
+            self.cache.update_strategy(symbol, strategy)
+        
+        logger.info(f"Estrategias iniciales cargadas para {len(common_symbols)} símbolos")
+
+    def _update_market_data_periodically(self):
+        """Actualiza datos de mercado periódicamente"""
+        while self.should_run:
+            try:
+                # Obtener símbolos actuales
+                symbols = self.cache.get_all_symbols()
+                
+                if symbols:
+                    # Añadir símbolos comunes si no hay ninguno en caché
+                    if not symbols:
+                        symbols = ["AAPL", "MSFT", "GOOG", "AMZN", "TSLA"]
+                    
+                    # Consultar datos de mercado
+                    symbols_str = ",".join(symbols)
+                    url = f"https://financialmodelingprep.com/api/v3/quote/{symbols_str}?apikey={self.fmp_api_key}"
+                    
+                    response = requests.get(url, timeout=10)
+                    if response.status_code == 200:
+                        quotes = response.json()
+                        
+                        # Actualizar caché con datos de mercado
+                        for quote in quotes:
+                            market_data = MarketData(
+                                symbol=quote["symbol"],
+                                price=quote["price"],
+                                change=quote["change"],
+                                volume=quote["volume"],
+                                timestamp=datetime.now().isoformat()
+                            )
+                            self.cache.update_market_data(quote["symbol"], market_data)
+                        
+                        logger.info(f"Datos de mercado actualizados para {len(quotes)} símbolos")
+                    else:
+                        logger.warning(f"Error obteniendo datos de mercado: {response.status_code}")
+                
+                # Actualizar predicciones y estrategias
+                self._update_predictions_and_strategies()
+                
+            except Exception as e:
+                logger.error(f"Error en actualización periódica: {e}")
+            
+            # Dormir antes de la próxima actualización (5 minutos)
+            time.sleep(300)
+
+    def _update_predictions_and_strategies(self):
+        """Actualiza predicciones y estrategias basadas en el modelo ensemble"""
+        try:
+            if self.model_coordinator:
+                # Obtener símbolos con gestores
+                symbol_managers = self.model_coordinator.symbol_managers
+                
+                for symbol, manager in symbol_managers.items():
+                    # Extraer predicciones
+                    online_kb = manager.online_knowledge_base
+                    offline_kb = manager.offline_knowledge_base
+                    
+                    if online_kb:
+                        # Crear predicción del modelo online
+                        online_prediction = ModelPrediction(
+                            symbol=symbol,
+                            prediction=online_kb.get('prediction_trend', 0.0),
+                            confidence=online_kb.get('confidence', 0.5),
+                            timestamp=datetime.now().isoformat(),
+                            model_type='online',
+                            features=online_kb.get('feature_importance', {})
+                        )
+                        self.cache.update_prediction(online_prediction)
+                    
+                    if offline_kb:
+                        # Crear predicción del modelo offline
+                        offline_prediction = ModelPrediction(
+                            symbol=symbol,
+                            prediction=offline_kb.get('prediction_trend', 0.0),
+                            confidence=offline_kb.get('confidence', 0.5),
+                            timestamp=datetime.now().isoformat(),
+                            model_type='offline',
+                            features=offline_kb.get('feature_importances', {})
+                        )
+                        self.cache.update_prediction(offline_prediction)
+                    
+                    # Generar estrategia actualizada
+                    strategy = self._generate_symbol_strategy(symbol)
+                    self.cache.update_strategy(symbol, strategy)
+                
+                logger.info(f"Predicciones y estrategias actualizadas para {len(symbol_managers)} símbolos")
+            else:
+                # Si no hay coordinador, generar predicciones simuladas
+                symbols = self.cache.get_all_symbols()
+                
+                for symbol in symbols:
+                    # Generar estrategia actualizada
+                    strategy = self._generate_symbol_strategy(symbol)
+                    self.cache.update_strategy(symbol, strategy)
+                
+                logger.info(f"Estrategias simuladas actualizadas para {len(symbols)} símbolos")
+        except Exception as e:
+            logger.error(f"Error actualizando predicciones y estrategias: {e}")
+
+    def process_message(self, chat_message: ChatMessage) -> ChatResponse:
+        """
+        Procesa un mensaje de chat y genera una respuesta
+        
+        Args:
+            chat_message: Mensaje del usuario
+            
+        Returns:
+            Respuesta generada y ID de conversación
+        """
+        # Obtener o crear ID de conversación
+        conversation_id = chat_message.conversation_id
+        if not conversation_id:
+            conversation_id = str(uuid.uuid4())
+            self.conversations[conversation_id] = ConversationHistory(
+                messages=[],
+                metadata={
+                    "created_at": datetime.now().isoformat(),
+                    "last_updated": datetime.now().isoformat()
+                }
+            )
+        elif conversation_id not in self.conversations:
+            # Si el ID no existe, crear nueva conversación
+            self.conversations[conversation_id] = ConversationHistory(
+                messages=[],
+                metadata={
+                    "created_at": datetime.now().isoformat(),
+                    "last_updated": datetime.now().isoformat()
+                }
+            )
+        
+        # Agregar mensaje a la conversación
+        conversation = self.conversations[conversation_id]
+        conversation.messages.append({
+            "role": "user",
+            "content": chat_message.message,
+            "timestamp": datetime.now().isoformat()
+        })
+        
+        # Generar respuesta
+        response = self._generate_response(chat_message.message, conversation_id)
+        
+        # Agregar respuesta a la conversación
+        conversation.messages.append({
+            "role": "assistant",
+            "content": response,
+            "timestamp": datetime.now().isoformat()
+        })
+        
+        # Actualizar timestamp
+        conversation.metadata["last_updated"] = datetime.now().isoformat()
+        
+        # Limitar tamaño del historial de conversaciones
+        if len(conversation.messages) > 50:
+            conversation.messages = conversation.messages[-50:]
+        
+        return ChatResponse(
+            response=response,
+            conversation_id=conversation_id
+        )
+    
+    def _generate_response(self, message: str, conversation_id: str) -> str:
+        """
+        Genera una respuesta utilizando el modelo Llama o reglas predefinidas
+        
+        Args:
+            message: Mensaje del usuario
+            conversation_id: ID de la conversación
+            
+        Returns:
+            Respuesta generada
+        """
+        # Si el mensaje es vacío o muy corto
+        if not message or len(message) < 2:
+            return "Por favor, envía un mensaje más detallado para poder ayudarte."
+        
+        # Detectar intenciones específicas
+        intent, params = self._detect_intent(message)
+        
+        # Procesar según la intención detectada
+        if intent == "get_strategy":
+            return self._get_investment_strategy(params.get("symbol"))
+        elif intent == "get_portfolio":
+            return self._get_portfolio_info()
+        elif intent == "get_cash":
+            return self._get_cash_info()
+        elif intent == "place_order":
+            return self._handle_order_intent(params)
+        elif intent == "get_risk":
+            return self._get_risk_metrics()
+        elif intent == "get_market_data":
+            return self._get_market_data(params.get("symbol"))
+        elif intent == "get_predictions":
+            return self._get_predictions(params.get("symbol"))
+        elif intent == "get_help":
+            return self._get_help_info()
+        
+        # Si llegamos aquí, intentar generar respuesta con Llama
+        if self.model:
+            try:
+                # Obtener contexto de la conversación
+                conversation = self.conversations[conversation_id]
+                prompt = self._build_llama_prompt(conversation, message)
+                
+                # Generar respuesta con el modelo
+                response = self.model(
+                    prompt,
+                    max_tokens=512,
+                    stop=["<|user|>", "

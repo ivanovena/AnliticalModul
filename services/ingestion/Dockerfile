@@ -6,11 +6,16 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends \
     netcat-openbsd \
     curl \
+    postgresql-client \
+    libpq-dev \
+    gcc \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+# Reinstalar psycopg2-binary con la versión correcta de libpq
+RUN pip uninstall -y psycopg2-binary && pip install --no-cache-dir psycopg2-binary
 
 # Copy application code
 COPY . .

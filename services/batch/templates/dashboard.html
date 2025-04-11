@@ -1,0 +1,160 @@
+
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Model Training Dashboard</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background-color: white;
+            padding: 20px;
+            border-radius: 5px;
+            box-shadow: 0 0 10px rgba(0,0,0,0.1);
+        }
+        h1, h2, h3 {
+            color: #2c3e50;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-bottom: 20px;
+        }
+        th, td {
+            padding: 12px 15px;
+            text-align: left;
+            border-bottom: 1px solid #ddd;
+        }
+        th {
+            background-color: #f2f2f2;
+            font-weight: bold;
+        }
+        tr:hover {
+            background-color: #f5f5f5;
+        }
+        .good {
+            color: green;
+            font-weight: bold;
+        }
+        .bad {
+            color: red;
+            font-weight: bold;
+        }
+        .model-card {
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            padding: 15px;
+            margin-bottom: 20px;
+        }
+        .model-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+        .model-header h3 {
+            margin: 0;
+        }
+        .metrics {
+            display: flex;
+            gap: 20px;
+            flex-wrap: wrap;
+            margin-bottom: 15px;
+        }
+        .metric {
+            background: #f0f0f0;
+            padding: 10px;
+            border-radius: 5px;
+            min-width: 120px;
+        }
+        .metric p {
+            margin: 0;
+            font-size: 0.9em;
+        }
+        .metric .value {
+            font-size: 1.2em;
+            font-weight: bold;
+        }
+        .model-actions {
+            margin-top: 15px;
+        }
+        .btn {
+            padding: 8px 12px;
+            background-color: #3498db;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            text-decoration: none;
+            font-size: 14px;
+            display: inline-block;
+        }
+        .btn:hover {
+            background-color: #2980b9;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Model Training Dashboard</h1>
+        <p>Last updated: {{ last_updated }}</p>
+        
+        <h2>Model Summary</h2>
+        <table>
+            <tr>
+                <th>Symbol</th>
+                <th>Latest Model</th>
+                <th>Training Date</th>
+                <th>R²</th>
+                <th>MAE</th>
+                <th>RMSE</th>
+                <th>Actions</th>
+            </tr>
+            {% for symbol, model in models.items() %}
+                {% if model.latest_version and model.versions|length > 0 %}
+                <tr>
+                    <td>{{ symbol }}</td>
+                    <td>{{ model.versions[0].best_model }}</td>
+                    <td>{{ model.versions[0].creation_date|replace('T', ' ')|truncate(16, true, '') }}</td>
+                    <td class="{% if model.versions[0].metrics.r2 > 0.5 %}good{% elif model.versions[0].metrics.r2 < 0.2 %}bad{% endif %}">
+                        {{ "%.4f"|format(model.versions[0].metrics.r2) if model.versions[0].metrics.r2 is defined else 'N/A' }}
+                    </td>
+                    <td>{{ "%.4f"|format(model.versions[0].metrics.mae) if model.versions[0].metrics.mae is defined else 'N/A' }}</td>
+                    <td>{{ "%.4f"|format(model.versions[0].metrics.rmse) if model.versions[0].metrics.rmse is defined else 'N/A' }}</td>
+                    <td>
+                        <a href="/model/{{ symbol }}" class="btn">Details</a>
+                        <a href="/report/{{ symbol }}" class="btn">Report</a>
+                    </td>
+                </tr>
+                {% endif %}
+            {% endfor %}
+        </table>
+        
+        <h2>Recent Training Runs</h2>
+        <table>
+            <tr>
+                <th>Timestamp</th>
+                <th>Symbols Processed</th>
+                <th>Success Rate</th>
+                <th>Report</th>
+            </tr>
+            {% for run in recent_runs %}
+            <tr>
+                <td>{{ run.timestamp|replace('T', ' ')|truncate(16, true, '') }}</td>
+                <td>{{ run.symbols_processed }}</td>
+                <td>{{ "%.1f%%"|format(run.success_rate * 100) }}</td>
+                <td><a href="/batch_results/{{ run.filename }}" class="btn">View Details</a></td>
+            </tr>
+            {% endfor %}
+        </table>
+    </div>
+</body>
+</html>

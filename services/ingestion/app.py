@@ -30,7 +30,7 @@ FMP_STABLE_URL = os.environ.get('FMP_STABLE_URL', 'https://financialmodelingprep
 KAFKA_BROKER = os.environ.get('KAFKA_BROKER', 'kafka:9092') 
 INGESTION_TOPIC = os.environ.get('INGESTION_TOPIC', 'ingestion_events')
 REALTIME_TOPIC = os.environ.get('REALTIME_TOPIC', 'realtime_events')  # Nuevo topic para datos en tiempo real
-DB_URI = os.environ.get('DB_URI', 'postgresql://postgres:postgres@postgres:5432/trading')
+DB_URI = os.environ.get('DB_URI', 'postgresql://market_admin:postgres@postgres:5432/market_data')
 REALTIME_INTERVAL_SECONDS = int(os.environ.get('REALTIME_INTERVAL_SECONDS', 300))  # 5 minutos por defecto
 
 # Crear conexión a PostgreSQL
@@ -628,7 +628,7 @@ def historical_ingestion_thread():
                         logger.info(f"Incremental fetch for {symbol} {data_type} from {start_date}")
                         
                         # Si la fecha de inicio es posterior a la fecha de fin, no hay nada que hacer
-                        if start_date > end_date:
+                        if (start_date > end_date):
                             logger.info(f"No new data needed for {symbol} {data_type}, already up to date")
                             continue
                     else:
