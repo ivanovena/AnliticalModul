@@ -213,8 +213,20 @@ services:
     build:
       context: ./web
       dockerfile: Dockerfile
-    container_name: ${COMPOSE_PROJECT_NAME:-project7}-frontend-1
+    ports:
+      - "80:80"
+    depends_on:
+      - ingestion
+      - broker
+      - streaming
+    networks:
+      - project7_network
     restart: always
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost/healthcheck.html", "||", "exit", "1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
     depends_on:
       - broker
       - streaming
@@ -227,6 +239,12 @@ services:
       - NGINX_PORT=80
     networks:
       - trading_network
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost/healthcheck.html || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
 
 volumes:
   kafka_data:

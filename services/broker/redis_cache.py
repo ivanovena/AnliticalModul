@@ -37,7 +37,7 @@ class RedisCache:
         """
         self.host = host or os.getenv("REDIS_HOST", "redis")
         self.port = port or int(os.getenv("REDIS_PORT", "6379"))
-        self.password = password or os.getenv("REDIS_PASSWORD", "redis123")
+        self.password = password or os.getenv("REDIS_PASSWORD", "")
         self.db = db
         self.prefix = prefix
         self.default_ttl = ttl
@@ -50,21 +50,45 @@ class RedisCache:
     def _connect(self) -> None:
         """Establece conexión con Redis"""
         try:
-            self.client = redis.Redis(
-                host=self.host,
-                port=self.port,
-                password=self.password,
-                db=self.db,
-                decode_responses=True,
-                socket_timeout=5,
-                socket_connect_timeout=5
-            )
+            # Crear configuración básica sin contraseña
+            config = {
+                "host": self.host,
+                "port": self.port,
+                "db": self.db,
+                "decode_responses": True,
+                "socket_timeout": 5,
+                "socket_connect_timeout": 5
+            }
+            
+            # Añadir contraseña solo si está definida
+            if self.password:
+                config["password"] = self.password
+            
+            self.client = redis.Redis(**config)
             
             # Verificar conexión
             self.client.ping()
             self.connected = True
-            logger.info(f"Conexión establecida con Redis en {self.host}:{self.port}")
+            logger.info(f"Conexión Redis establecida correctamente en {self.host}:{self.port}")
             
+        except redis.exceptions.AuthenticationError as auth_err:
+            # Intentar sin contraseña si falla la autenticación
+            try:
+                logger.warning(f"Error de autenticación en Redis: {auth_err}. Intentando sin contraseña.")
+                self.client = redis.Redis(
+                    host=self.host,
+                    port=self.port,
+                    db=self.db,
+                    decode_responses=True,
+                    socket_timeout=5,
+                    socket_connect_timeout=5
+                )
+                self.client.ping()
+                self.connected = True
+                logger.info(f"Conexión Redis establecida sin autenticación en {self.host}:{self.port}")
+            except Exception as e:
+                self.connected = False
+                logger.error(f"Error al conectar con Redis sin autenticación: {e}")
         except Exception as e:
             self.connected = False
             logger.error(f"Error al conectar con Redis: {e}")

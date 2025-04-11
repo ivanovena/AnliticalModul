@@ -486,19 +486,49 @@ class LlamaAgent:
                         )
                         self.cache.update_prediction(offline_prediction)
                     
-                    # Generar estrategia actualizada
-                    strategy = self._generate_symbol_strategy(symbol)
-                    self.cache.update_strategy(symbol, strategy)
+                    # Intentar generar estrategia enriquecida
+                    try:
+                        # Crear un loop asíncrono
+                        import asyncio
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+                        
+                        # Generar estrategia enriquecida con datos fundamentales y noticias
+                        enriched_strategy = loop.run_until_complete(self._generate_enriched_symbol_strategy(symbol))
+                        loop.close()
+                        
+                        # Actualizar caché con la estrategia enriquecida
+                        self.cache.update_strategy(symbol, enriched_strategy)
+                    except Exception as e:
+                        logger.warning(f"Error generando estrategia enriquecida para {symbol}, usando método tradicional: {e}")
+                        # En caso de error, usar el método tradicional
+                        strategy = self._generate_symbol_strategy(symbol)
+                        self.cache.update_strategy(symbol, strategy)
                 
-                logger.info(f"Predicciones and estrategias actualizadas para {len(symbol_managers)} símbolos")
+                logger.info(f"Predicciones y estrategias actualizadas para {len(symbol_managers)} símbolos")
             else:
                 # Si no hay coordinador, generar predicciones simuladas
                 symbols = self.cache.get_all_symbols()
                 
                 for symbol in symbols:
-                    # Generar estrategia actualizada
-                    strategy = self._generate_symbol_strategy(symbol)
-                    self.cache.update_strategy(symbol, strategy)
+                    # Intentar generar estrategia enriquecida
+                    try:
+                        # Crear un loop asíncrono
+                        import asyncio
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+                        
+                        # Generar estrategia enriquecida
+                        enriched_strategy = loop.run_until_complete(self._generate_enriched_symbol_strategy(symbol))
+                        loop.close()
+                        
+                        # Actualizar caché
+                        self.cache.update_strategy(symbol, enriched_strategy)
+                    except Exception as e:
+                        logger.warning(f"Error generando estrategia enriquecida simulada para {symbol}: {e}")
+                        # En caso de error, usar el método tradicional
+                        strategy = self._generate_symbol_strategy(symbol)
+                        self.cache.update_strategy(symbol, strategy)
                 
                 logger.info(f"Estrategias simuladas actualizadas para {len(symbols)} símbolos")
         except Exception as e:
@@ -649,8 +679,9 @@ class LlamaAgent:
         Returns:
             Prompt formateado
         """
-        # Obtener contexto adicional (datos de mercado y predicciones)
+        # Obtener contexto adicional (datos de mercado, predicciones y datos enriquecidos)
         market_context = self._get_market_context()
+        enriched_context = self._get_enriched_context(message)
         
         # Sistema prompt mejorado para análisis financiero más completo
         system_prompt = (
@@ -710,6 +741,9 @@ class LlamaAgent:
         
         if market_context:
             prompt += f"Información de mercado actual:\n{market_context}\n\n"
+            
+        if enriched_context:
+            prompt += f"{enriched_context}\n\n"
         
         if exemplary_context:
             prompt += f"{exemplary_context}\n"
@@ -755,6 +789,163 @@ class LlamaAgent:
                 context_lines.append(line)
         
         return "\n".join(context_lines)
+    
+    def _get_enriched_context(self, message: str) -> str:
+        """
+        Obtiene un contexto enriquecido basado en el mensaje del usuario
+        usando datos adicionales de FMP como noticias y datos fundamentales
+        
+        Args:
+            message: Mensaje del usuario
+            
+        Returns:
+            Texto con información enriquecida relevante para el contexto
+        """
+        try:
+            # Detectar símbolos en el mensaje
+            symbol_pattern = r'\b([A-Z]{1,5}(?:\.MC|\.IS)?)\b'
+            symbols = re.findall(symbol_pattern, message.upper())
+            
+            # Si no hay símbolos específicos, usar algunas acciones populares
+            if not symbols:
+                symbols = ["AAPL", "MSFT", "GOOG"]
+            
+            # Limitar a máximo 2 símbolos para el contexto
+            symbols = symbols[:2]
+            
+            # Importar cliente de datos
+            from data_client import get_data_client
+            data_client = get_data_client()
+            
+            # Crear un loop para operaciones asíncronas
+            import asyncio
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            
+            # Función para obtener datos de un símbolo de forma asíncrona
+            async def get_symbol_data(symbol):
+                try:
+                    # Obtener noticias
+                    news = await data_client.get_company_news(symbol, limit=3)
+                    
+                    # Obtener perfil de la empresa
+                    profile = await data_client.get_company_profile(symbol)
+                    
+                    # Obtener métricas financieras
+                    metrics = await data_client.get_key_metrics(symbol)
+                    
+                    # Obtener análisis de sentimiento
+                    sentiment = await data_client.get_market_sentiment(symbol)
+                    
+                    return {
+                        "symbol": symbol,
+                        "news": news,
+                        "profile": profile,
+                        "metrics": metrics,
+                        "sentiment": sentiment
+                    }
+                except Exception as e:
+                    logger.error(f"Error obteniendo datos para {symbol}: {e}")
+                    return {"symbol": symbol, "error": str(e)}
+            
+            # Crear y ejecutar tareas para cada símbolo
+            tasks = [get_symbol_data(symbol) for symbol in symbols]
+            symbol_data_list = loop.run_until_complete(asyncio.gather(*tasks))
+            
+            # Cerrar cliente de datos y loop
+            loop.run_until_complete(data_client.close())
+            loop.close()
+            
+            # Formatear la información relevante para el contexto
+            context_parts = []
+            
+            for data in symbol_data_list:
+                symbol = data["symbol"]
+                
+                # Verificar si hubo error
+                if "error" in data:
+                    context_parts.append(f"No se pudieron obtener datos completos para {symbol}.")
+                    continue
+                
+                symbol_context = [f"Información enriquecida para {symbol}:"]
+                
+                # Añadir información del perfil si está disponible
+                profile = data.get("profile", {})
+                if profile:
+                    symbol_context.append(
+                        f"Perfil: {profile.get('name', symbol)} - "
+                        f"Sector: {profile.get('sector', 'N/A')}, "
+                        f"Industria: {profile.get('industry', 'N/A')}, "
+                        f"Cap. de Mercado: ${profile.get('marketCap', 0)/1000000000:.2f}B"
+                    )
+                
+                # Añadir métricas financieras clave si están disponibles
+                metrics = data.get("metrics", {})
+                if metrics:
+                    symbol_context.append(
+                        f"Métricas: P/E: {metrics.get('pe_ratio', 0):.2f}, "
+                        f"P/B: {metrics.get('price_to_book', 0):.2f}, "
+                        f"ROE: {metrics.get('roe', 0)*100:.2f}%, "
+                        f"Margen operativo: {metrics.get('operating_margin', 0)*100:.2f}%"
+                    )
+                
+                # Añadir análisis de sentimiento si está disponible
+                sentiment = data.get("sentiment", {})
+                if sentiment and "overall_score" in sentiment:
+                    symbol_context.append(
+                        f"Sentimiento: {sentiment.get('overall_score', 0):.2f}, "
+                        f"Recomendación: {sentiment.get('recommendation', 'NEUTRAL')}"
+                    )
+                
+                # Añadir titulares de noticias recientes
+                news = data.get("news", [])
+                if news:
+                    symbol_context.append("Noticias recientes:")
+                    for i, item in enumerate(news[:3], 1):
+                        # Añadir titular con sentimiento
+                        news_sentiment = item.get('sentiment', {}).get('score', 0)
+                        sentiment_icon = "🟢" if news_sentiment > 30 else "🔴" if news_sentiment < -30 else "🟡"
+                        
+                        symbol_context.append(
+                            f"{i}. {sentiment_icon} {item.get('title', 'Sin titular')} "
+                            f"({item.get('source', 'N/A')})"
+                        )
+                
+                # Agregar toda la información del símbolo al contexto
+                context_parts.append("\n".join(symbol_context))
+            
+            # Añadir próximos eventos si se detecta una intención relacionada con planificación
+            if re.search(r'\bcalendario|eventos|próximo|futuro|ganancias|dividendos\b', message.lower()):
+                try:
+                    # Obtener próximos eventos de ganancias
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    data_client = get_data_client()
+                    
+                    earnings_events = loop.run_until_complete(data_client.get_earnings_calendar())
+                    loop.run_until_complete(data_client.close())
+                    loop.close()
+                    
+                    if earnings_events and len(earnings_events) > 0:
+                        events_context = ["Próximos eventos de ganancias:"]
+                        for event in earnings_events[:5]:  # Limitar a 5 eventos
+                            events_context.append(
+                                f"{event.get('symbol', 'N/A')}: {event.get('date', 'N/A')}, "
+                                f"EPS est.: ${event.get('eps', 0):.2f}"
+                            )
+                        context_parts.append("\n".join(events_context))
+                except Exception as e:
+                    logger.error(f"Error obteniendo calendario de ganancias: {e}")
+            
+            # Unir todas las partes del contexto
+            full_context = "\n\n".join(context_parts)
+            
+            return full_context
+            
+        except Exception as e:
+            logger.error(f"Error generando contexto enriquecido: {e}")
+            # Devolver un contexto mínimo en caso de error
+            return "No se pudieron obtener datos adicionales en este momento."
     
     def _detect_intent(self, message: str) -> Tuple[str, Dict[str, Any]]:
         """
@@ -902,6 +1093,181 @@ class LlamaAgent:
                 risk_level=risk_level
             )
     
+    async def _generate_enriched_symbol_strategy(self, symbol: str) -> BrokerStrategy:
+        """
+        Genera una estrategia de inversión enriquecida para un símbolo
+        combinando predicciones de modelos técnicos con datos fundamentales
+        
+        Args:
+            symbol: Símbolo del activo
+            
+        Returns:
+            Estrategia de inversión enriquecida
+        """
+        try:
+            # Importar cliente de datos
+            from data_client import get_data_client
+            data_client = get_data_client()
+            
+            # Crear loop asíncrono
+            import asyncio
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            
+            # Obtener datos enriquecidos
+            profile = await data_client.get_company_profile(symbol)
+            metrics = await data_client.get_key_metrics(symbol)
+            news = await data_client.get_company_news(symbol, limit=5)
+            sentiment = await data_client.get_market_sentiment(symbol)
+            
+            # Obtener predicciones técnicas
+            predictions = self.cache.get_predictions(symbol)
+            market_data = self.cache.get_market_data(symbol)
+            
+            # Cerrar cliente
+            await data_client.close()
+            loop.close()
+            
+            # Variables para la estrategia final
+            action = "HOLD"
+            confidence = 0.5
+            prediction = 0.0
+            reasoning = []
+            risk_level = "MODERATE"
+            time_horizon = "MEDIUM"
+            
+            # 1. Considerar predicciones técnicas de nuestros modelos
+            if predictions and len(predictions) > 0:
+                latest_pred = predictions[-1]
+                technical_prediction = latest_pred.prediction
+                technical_confidence = latest_pred.confidence
+                
+                # Agregar esta información a la estrategia
+                prediction = technical_prediction
+                confidence = technical_confidence
+                
+                if technical_prediction > 0.15 and technical_confidence > 0.6:
+                    reasoning.append(f"Análisis técnico: Fuerte señal alcista con {technical_confidence:.2f} de confianza.")
+                    action = "BUY"
+                elif technical_prediction > 0.05 and technical_confidence > 0.5:
+                    reasoning.append(f"Análisis técnico: Señal alcista moderada con {technical_confidence:.2f} de confianza.")
+                    action = "BUY"
+                elif technical_prediction < -0.15 and technical_confidence > 0.6:
+                    reasoning.append(f"Análisis técnico: Fuerte señal bajista con {technical_confidence:.2f} de confianza.")
+                    action = "SELL"
+                elif technical_prediction < -0.05 and technical_confidence > 0.5:
+                    reasoning.append(f"Análisis técnico: Señal bajista moderada con {technical_confidence:.2f} de confianza.")
+                    action = "SELL"
+                else:
+                    reasoning.append(f"Análisis técnico: Sin tendencia clara. Confianza: {technical_confidence:.2f}")
+            
+            # 2. Considerar análisis de sentimiento de mercado
+            if sentiment and "overall_score" in sentiment:
+                sentiment_score = sentiment.get("overall_score", 0)
+                sentiment_recommendation = sentiment.get("recommendation", "NEUTRAL")
+                
+                reasoning.append(f"Sentimiento de mercado: {sentiment_recommendation} (score: {sentiment_score:.2f})")
+                
+                # Ajustar confianza y predicción según el sentimiento
+                if abs(sentiment_score) > 30:
+                    # Si el sentimiento es fuerte, ajustar la confianza y la predicción
+                    confidence = (confidence + 0.8) / 2  # Promedio con alta confianza
+                    prediction = (prediction + sentiment_score/100) / 2  # Ajustar predicción
+                    
+                    # Si el sentimiento contradice fuertemente el análisis técnico, ajustar acción
+                    if sentiment_score > 30 and action == "SELL":
+                        action = "HOLD"
+                        reasoning.append("Señal mixta: Sentimiento positivo contradice análisis técnico bajista.")
+                    elif sentiment_score < -30 and action == "BUY":
+                        action = "HOLD"
+                        reasoning.append("Señal mixta: Sentimiento negativo contradice análisis técnico alcista.")
+            
+            # 3. Considerar datos fundamentales
+            if metrics:
+                pe_ratio = metrics.get("pe_ratio", 0)
+                price_to_book = metrics.get("price_to_book", 0)
+                debt_to_equity = metrics.get("debt_to_equity", 0)
+                current_ratio = metrics.get("current_ratio", 0)
+                
+                # Evaluar métricas de valoración
+                if pe_ratio > 0:  # Asegurarse que el PE no sea negativo
+                    pe_interpretation = ""
+                    
+                    # Interpretación del P/E (estos son valores generales, pueden ajustarse por sector)
+                    if pe_ratio < 10:
+                        pe_interpretation = "potencialmente infravalorada"
+                    elif pe_ratio > 30:
+                        pe_interpretation = "potencialmente sobrevalorada"
+                    
+                    if pe_interpretation:
+                        reasoning.append(f"Valoración: P/E ratio de {pe_ratio:.2f} indica empresa {pe_interpretation}.")
+                
+                # Evaluar salud financiera
+                if current_ratio < 1:
+                    reasoning.append(f"Riesgo de liquidez: Ratio de liquidez bajo ({current_ratio:.2f}).")
+                    risk_level = "HIGH"
+                
+                if debt_to_equity > 2:
+                    reasoning.append(f"Riesgo de deuda: Alto nivel de apalancamiento (D/E: {debt_to_equity:.2f}).")
+                    risk_level = "HIGH"
+                elif debt_to_equity < 0.5:
+                    reasoning.append(f"Fortaleza financiera: Bajo nivel de deuda (D/E: {debt_to_equity:.2f}).")
+                    if risk_level != "HIGH":  # No bajar el nivel si ya es alto
+                        risk_level = "LOW"
+            
+            # 4. Considerar noticias recientes
+            if news and len(news) > 0:
+                # Calcular sentimiento promedio de las noticias
+                news_scores = [item.get("sentiment", {}).get("score", 0) for item in news if "sentiment" in item]
+                if news_scores:
+                    avg_news_sentiment = sum(news_scores) / len(news_scores)
+                    
+                    # Encontrar la noticia más importante (con mayor sentimiento absoluto)
+                    important_news = max(news, key=lambda x: abs(x.get("sentiment", {}).get("score", 0)) if "sentiment" in x else 0)
+                    
+                    if abs(avg_news_sentiment) > 30:
+                        news_direction = "positivas" if avg_news_sentiment > 0 else "negativas"
+                        reasoning.append(f"Noticias recientes: Predominantemente {news_direction}.")
+                        
+                        # Destacar noticia importante
+                        important_title = important_news.get("title", "")
+                        important_score = important_news.get("sentiment", {}).get("score", 0)
+                        if important_title and abs(important_score) > 40:
+                            reasoning.append(f"Noticia destacada: '{important_title[:50]}...'")
+                            
+                            # Si hay una noticia muy negativa y la acción es comprar, aumentar el riesgo
+                            if important_score < -50 and action == "BUY":
+                                risk_level = "HIGH"
+                                reasoning.append("Precaución: Noticias muy negativas aumentan el riesgo.")
+                            
+                            # Si hay una noticia muy positiva y la acción es vender, reconsiderar
+                            if important_score > 50 and action == "SELL":
+                                reasoning.append("Nota: A pesar de los indicadores técnicos negativos, las noticias son muy positivas.")
+            
+            # 5. Determinar horizonte temporal basado en la combinación de factores
+            if "Fortaleza financiera" in ' '.join(reasoning) and action == "BUY":
+                time_horizon = "LONG"
+                reasoning.append("Recomendación para largo plazo basada en fortaleza financiera.")
+            elif "Riesgo" in ' '.join(reasoning) and action != "HOLD":
+                time_horizon = "SHORT"
+                reasoning.append("Horizonte temporal corto debido a factores de riesgo identificados.")
+            
+            # Crear y devolver estrategia enriquecida
+            return BrokerStrategy(
+                symbol=symbol,
+                action=action,
+                confidence=round(confidence, 2),
+                prediction=round(prediction, 2),
+                reasoning=". ".join(reasoning),
+                time_horizon=time_horizon,
+                risk_level=risk_level
+            )
+        
+        except Exception as e:
+            logger.error(f"Error generando estrategia enriquecida para {symbol}: {e}")
+            # En caso de error, volver al método tradicional
+            return self._generate_symbol_strategy(symbol)
+    
     def _get_investment_strategy(self, symbol: str) -> str:
         """
         Obtiene la estrategia de inversión para un símbolo
@@ -915,29 +1281,64 @@ class LlamaAgent:
         if not symbol:
             return "Por favor, especifica un símbolo de activo (por ejemplo, AAPL, MSFT, etc.)"
         
-        # Obtener datos del símbolo
-        strategy = self.cache.get_strategy(symbol)
-        market_data = self.cache.get_market_data(symbol)
-        
-        if not strategy:
-            # Generar estrategia si no existe
-            strategy = self._generate_symbol_strategy(symbol)
-            self.cache.update_strategy(symbol, strategy)
-        
-        # Construir respuesta
-        response = [f"**Estrategia para {symbol}**"]
-        
-        if market_data:
-            response.append(f"Precio actual: ${market_data.price:.2f} ({market_data.change:+.2f}%)")
-        
-        response.append(f"Recomendación: {strategy.action}")
-        response.append(f"Confianza: {strategy.confidence:.2f}")
-        response.append(f"Predicción: {strategy.prediction:.2f}")
-        response.append(f"Razonamiento: {strategy.reasoning}")
-        response.append(f"Horizonte temporal: {strategy.time_horizon}")
-        response.append(f"Nivel de riesgo: {strategy.risk_level}")
-        
-        return "\n".join(response)
+        try:
+            # Intentar generar una estrategia enriquecida con datos fundamentales
+            import asyncio
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            
+            # Generar estrategia enriquecida
+            enriched_strategy = loop.run_until_complete(self._generate_enriched_symbol_strategy(symbol))
+            loop.close()
+            
+            # Actualizar la caché con la estrategia enriquecida
+            self.cache.update_strategy(symbol, enriched_strategy)
+            
+            # Obtener datos de mercado
+            market_data = self.cache.get_market_data(symbol)
+            
+            # Construir respuesta
+            response = [f"**Estrategia para {symbol}**"]
+            
+            if market_data:
+                response.append(f"Precio actual: ${market_data.price:.2f} ({market_data.change:+.2f}%)")
+            
+            response.append(f"Recomendación: {enriched_strategy.action}")
+            response.append(f"Confianza: {enriched_strategy.confidence:.2f}")
+            response.append(f"Predicción: {enriched_strategy.prediction:.2f}%")
+            response.append(f"Horizonte temporal: {enriched_strategy.time_horizon}")
+            response.append(f"Nivel de riesgo: {enriched_strategy.risk_level}")
+            response.append("\n**Análisis Completo:**")
+            response.append(f"{enriched_strategy.reasoning}")
+            
+            return "\n".join(response)
+            
+        except Exception as e:
+            logger.error(f"Error generando estrategia enriquecida: {e}")
+            
+            # Si hubo un error, usar el método tradicional como fallback
+            strategy = self.cache.get_strategy(symbol)
+            market_data = self.cache.get_market_data(symbol)
+            
+            if not strategy:
+                # Generar estrategia si no existe
+                strategy = self._generate_symbol_strategy(symbol)
+                self.cache.update_strategy(symbol, strategy)
+            
+            # Construir respuesta
+            response = [f"**Estrategia para {symbol}**"]
+            
+            if market_data:
+                response.append(f"Precio actual: ${market_data.price:.2f} ({market_data.change:+.2f}%)")
+            
+            response.append(f"Recomendación: {strategy.action}")
+            response.append(f"Confianza: {strategy.confidence:.2f}")
+            response.append(f"Predicción: {strategy.prediction:.2f}")
+            response.append(f"Razonamiento: {strategy.reasoning}")
+            response.append(f"Horizonte temporal: {strategy.time_horizon}")
+            response.append(f"Nivel de riesgo: {strategy.risk_level}")
+            
+            return "\n".join(response)
     
     def _get_portfolio_info(self) -> str:
         """
