@@ -2,6 +2,7 @@
   "name": "trading-dashboard",
   "version": "1.0.0",
   "private": true,
+  "proxy": "http://localhost:8001",
   "dependencies": {
     "@emotion/react": "^11.10.6",
     "@emotion/styled": "^11.10.6",

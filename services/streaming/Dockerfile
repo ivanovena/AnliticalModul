@@ -5,6 +5,8 @@ WORKDIR /app
 # Install dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+# Instalar explícitamente fastapi y sus dependencias
+RUN pip install --no-cache-dir fastapi uvicorn websockets
 
 # Copy application code
 COPY . .

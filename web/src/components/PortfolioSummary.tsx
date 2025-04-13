@@ -1,15 +1,66 @@
-import React from 'react';
+import React, { useState } from 'react';
 import {
   Box, Typography, Grid, Paper, Divider,
   Table, TableBody, TableCell, TableContainer,
   TableHead, TableRow, Chip, LinearProgress,
-  Card, CardContent
+  Card, CardContent, Button, TextField, Dialog,
+  DialogActions, DialogContent, DialogContentText,
+  DialogTitle, InputAdornment, Snackbar, Alert
 } from '@mui/material';
 import { useTradingContext } from '../contexts/TradingContext';
 import { Position } from '../types/api';
 
 const PortfolioSummary: React.FC = () => {
-  const { portfolio, metrics } = useTradingContext();
+  const { portfolio, metrics, placeOrder } = useTradingContext();
+  const [openDialog, setOpenDialog] = useState(false);
+  const [initialCapital, setInitialCapital] = useState(100000);
+  const [openSnackbar, setOpenSnackbar] = useState(false);
+  const [snackbarMessage, setSnackbarMessage] = useState('');
+  const [snackbarSeverity, setSnackbarSeverity] = useState<'success' | 'error'>('success');
+  const [isProcessing, setIsProcessing] = useState(false);
+
+  const handleDialogOpen = () => {
+    setOpenDialog(true);
+    if (portfolio) {
+      setInitialCapital(portfolio.total_value);
+    }
+  };
+
+  const handleDialogClose = () => {
+    setOpenDialog(false);
+  };
+
+  const handleSetInitialCapital = async () => {
+    setIsProcessing(true);
+    try {
+      // Crear una orden de tipo "INIT_CAPITAL" para actualizar el capital inicial
+      await placeOrder({
+        symbol: "CASH", // Símbolo especial para operaciones de caja
+        action: "INIT_CAPITAL" as any, // Tipo especial de acción para inicializar capital
+        quantity: 1,
+        price: initialCapital // El precio aquí representa el monto del capital inicial
+      });
+      
+      // Mostrar mensaje de éxito
+      setSnackbarMessage(`Capital inicial actualizado a $${initialCapital.toFixed(2)}`);
+      setSnackbarSeverity('success');
+      setOpenSnackbar(true);
+      
+      // Cerrar el diálogo
+      setOpenDialog(false);
+    } catch (error) {
+      console.error("Error al actualizar capital inicial:", error);
+      setSnackbarMessage("Error al actualizar el capital inicial. Intente nuevamente.");
+      setSnackbarSeverity('error');
+      setOpenSnackbar(true);
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
+  const handleSnackbarClose = () => {
+    setOpenSnackbar(false);
+  };
 
   if (!portfolio) {
     return (
@@ -71,9 +122,18 @@ const PortfolioSummary: React.FC = () => {
 
   return (
     <Box>
-      <Typography variant="h6" gutterBottom>
-        Resumen del Portafolio
-      </Typography>
+      <Box display="flex" justifyContent="space-between" alignItems="center" mb={2}>
+        <Typography variant="h6">
+          Resumen del Portafolio
+        </Typography>
+        <Button 
+          variant="outlined" 
+          size="small" 
+          onClick={handleDialogOpen}
+        >
+          Establecer Capital Inicial
+        </Button>
+      </Box>
 
       {/* Tarjetas con métricas principales */}
       <Grid container spacing={2} mb={3}>
@@ -303,6 +363,55 @@ const PortfolioSummary: React.FC = () => {
           </Card>
         </Grid>
       </Grid>
+
+      {/* Diálogo para establecer capital inicial */}
+      <Dialog open={openDialog} onClose={handleDialogClose}>
+        <DialogTitle>Establecer Capital Inicial</DialogTitle>
+        <DialogContent>
+          <DialogContentText>
+            Introduce el monto de capital inicial para tu cartera de inversiones. Esto reiniciará tu cartera actual.
+          </DialogContentText>
+          <TextField
+            autoFocus
+            margin="dense"
+            label="Capital Inicial"
+            type="number"
+            fullWidth
+            variant="outlined"
+            value={initialCapital}
+            onChange={(e) => setInitialCapital(Number(e.target.value))}
+            InputProps={{
+              startAdornment: <InputAdornment position="start">$</InputAdornment>,
+            }}
+          />
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={handleDialogClose} disabled={isProcessing}>Cancelar</Button>
+          <Button 
+            onClick={handleSetInitialCapital} 
+            variant="contained" 
+            disabled={isProcessing}
+          >
+            {isProcessing ? "Procesando..." : "Establecer"}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* Snackbar para mostrar mensajes */}
+      <Snackbar 
+        open={openSnackbar} 
+        autoHideDuration={6000} 
+        onClose={handleSnackbarClose}
+        anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}
+      >
+        <Alert 
+          onClose={handleSnackbarClose} 
+          severity={snackbarSeverity}
+          variant="filled"
+        >
+          {snackbarMessage}
+        </Alert>
+      </Snackbar>
     </Box>
   );
 };

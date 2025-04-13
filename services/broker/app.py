@@ -58,6 +58,15 @@ app = FastAPI(
     version="1.0.0"
 )
 
+# Agregar middleware CORS para permitir peticiones desde el frontend
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Permitir todos los orígenes
+    allow_credentials=True,
+    allow_methods=["*"],  # Permitir todos los métodos
+    allow_headers=["*"],  # Permitir todos los encabezados
+)
+
 # Configuración del servidor para usar el puerto 8001 como se espera en Nginx
 import uvicorn
 

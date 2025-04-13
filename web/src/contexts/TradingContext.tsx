@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
-import { marketService, portfolioService, analysisService } from '../services/api';
+import { marketService, portfolioService, analysisService, metricsService } from '../services/api';
 import { MarketData, Portfolio, Order, Prediction, ModelStatus, Metrics } from '../types/api';
 
 // Interfaz para el contexto
@@ -18,11 +18,12 @@ interface TradingContextType {
   
   // Acciones
   setSelectedSymbol: (symbol: string) => void;
-  placeOrder: (order: Omit<Order, 'timestamp' | 'total_value'>) => Promise<void>;
+  placeOrder: (order: Order) => Promise<void>;
   fetchMarketData: (symbol: string) => Promise<void>;
   fetchPrediction: (symbol: string) => Promise<void>;
   refreshPortfolio: () => Promise<void>;
   refreshMetrics: () => Promise<void>;
+  refreshModelsStatus: () => Promise<void>;
 }
 
 // Crear contexto con valores por defecto
@@ -35,77 +36,26 @@ interface TradingProviderProps {
 
 // Proveedor de contexto
 export const TradingProvider: React.FC<TradingProviderProps> = ({ children }) => {
-  // Estado
-  const [portfolio, setPortfolio] = useState<Portfolio | null>(null);
-  const [selectedSymbol, setSelectedSymbol] = useState<string>('AAPL');
-  const [marketData, setMarketData] = useState<Record<string, MarketData>>({});
-  const [predictions, setPredictions] = useState<Record<string, Prediction>>({});
-  const [orders, setOrders] = useState<Order[]>([]);
-  const [metrics, setMetrics] = useState<Metrics | null>(null);
+  // Estado para símbolos disponibles
   const [availableSymbols, setAvailableSymbols] = useState<string[]>([]);
+  // Estado para símbolo seleccionado
+  const [selectedSymbol, setSelectedSymbol] = useState<string>('AAPL');
+  // Estado para datos de mercado (precio, etc.)
+  const [marketData, setMarketData] = useState<Record<string, MarketData>>({});
+  // Estado para predicciones
+  const [predictions, setPredictions] = useState<Record<string, Prediction>>({});
+  // Estado para portafolio
+  const [portfolio, setPortfolio] = useState<Portfolio | null>(null);
+  // Estado para órdenes
+  const [orders, setOrders] = useState<Order[]>([]);
+  // Estado para métricas
+  const [metrics, setMetrics] = useState<Metrics | null>(null);
+  // Estado para modelos
   const [modelsStatus, setModelsStatus] = useState<ModelStatus[] | null>(null);
+  // Estado para indicar carga
   const [isLoading, setIsLoading] = useState<boolean>(true);
+  // Estado para gestionar errores
   const [error, setError] = useState<string | null>(null);
-
-  // Cargar datos iniciales
-  useEffect(() => {
-    const loadInitialData = async () => {
-      setIsLoading(true);
-      try {
-        // Cargar lista de símbolos
-        const symbols = await marketService.getSymbols();
-        setAvailableSymbols(symbols);
-        
-        // Cargar portafolio
-        await refreshPortfolio();
-        
-        // Cargar órdenes
-        const ordersData = await portfolioService.getOrders();
-        setOrders(ordersData);
-        
-        // Cargar métricas
-        await refreshMetrics();
-        
-        // Cargar estado de modelos
-        const status = await analysisService.getModelStatus();
-        setModelsStatus(status);
-        
-        // Cargar datos de mercado y predicciones para el símbolo seleccionado
-        if (selectedSymbol) {
-          await fetchMarketData(selectedSymbol);
-          await fetchPrediction(selectedSymbol);
-        }
-        
-        setError(null);
-      } catch (err) {
-        setError(`Error cargando datos iniciales: ${err instanceof Error ? err.message : String(err)}`);
-        console.error('Error cargando datos iniciales:', err);
-      } finally {
-        setIsLoading(false);
-      }
-    };
-    
-    loadInitialData();
-    
-    // Configurar intervalo para actualizar datos automáticamente
-    const intervalId = setInterval(() => {
-      if (selectedSymbol) {
-        fetchMarketData(selectedSymbol).catch(console.error);
-        fetchPrediction(selectedSymbol).catch(console.error);
-      }
-      refreshPortfolio().catch(console.error);
-    }, 30000); // Actualizar cada 30 segundos
-    
-    return () => clearInterval(intervalId);
-  }, []);
-
-  // Actualizar datos de mercado cuando cambia el símbolo seleccionado
-  useEffect(() => {
-    if (selectedSymbol) {
-      fetchMarketData(selectedSymbol).catch(console.error);
-      fetchPrediction(selectedSymbol).catch(console.error);
-    }
-  }, [selectedSymbol]);
 
   // Funciones para interactuar con la API
   const fetchMarketData = async (symbol: string) => {
@@ -146,7 +96,7 @@ export const TradingProvider: React.FC<TradingProviderProps> = ({ children }) =>
 
   const refreshMetrics = async () => {
     try {
-      const metricsData = await portfolioService.getMetrics();
+      const metricsData = await metricsService.getMetrics();
       setMetrics(metricsData);
     } catch (err) {
       console.error('Error refreshing metrics:', err);
@@ -154,7 +104,17 @@ export const TradingProvider: React.FC<TradingProviderProps> = ({ children }) =>
     }
   };
 
-  const placeOrder = async (order: Omit<Order, 'timestamp' | 'total_value'>) => {
+  const refreshModelsStatus = async () => {
+    try {
+      const status = await analysisService.getModelStatus();
+      setModelsStatus(status);
+    } catch (err) {
+      console.error('Error refreshing models status:', err);
+      throw err;
+    }
+  };
+
+  const placeOrder = async (order: Order) => {
     try {
       await portfolioService.placeOrder(order);
       
@@ -171,6 +131,111 @@ export const TradingProvider: React.FC<TradingProviderProps> = ({ children }) =>
       throw err;
     }
   };
+
+  // Obtener datos iniciales cuando se monta el componente
+  useEffect(() => {
+    const fetchInitialData = async () => {
+      setIsLoading(true);
+      setError(null);
+      
+      try {
+        // Obtener símbolos disponibles
+        const symbols = await marketService.getSymbols();
+        setAvailableSymbols(symbols);
+        
+        // Si no hay símbolos seleccionados, seleccionar el primero
+        if (!selectedSymbol && symbols.length > 0) {
+          setSelectedSymbol(symbols[0]);
+        }
+        
+        // Obtener datos de mercado para todos los símbolos
+        const marketDataPromises = symbols.map(async (symbol) => {
+          try {
+            const data = await marketService.getMarketData(symbol);
+            return { symbol, data };
+          } catch (err) {
+            console.error(`Error fetching market data for ${symbol}:`, err);
+            // Devolver un objeto con datos de mercado por defecto en caso de error
+            return { symbol, data: null };
+          }
+        });
+        
+        const marketDataResults = await Promise.all(marketDataPromises);
+        const marketDataMap: Record<string, MarketData> = {};
+        
+        marketDataResults.forEach(({ symbol, data }) => {
+          if (data) {
+            marketDataMap[symbol] = data;
+          }
+        });
+        
+        setMarketData(marketDataMap);
+        
+        // Obtener predicciones para todos los símbolos
+        const predictionsPromises = symbols.map(async (symbol) => {
+          try {
+            const prediction = await analysisService.getPrediction(symbol);
+            return { symbol, prediction };
+          } catch (err) {
+            console.error(`Error fetching prediction for ${symbol}:`, err);
+            // Crear un objeto de predicción por defecto en caso de error
+            return { symbol, prediction: null };
+          }
+        });
+        
+        const predictionsResults = await Promise.all(predictionsPromises);
+        const predictionsMap: Record<string, Prediction> = {};
+        
+        predictionsResults.forEach(({ symbol, prediction }) => {
+          if (prediction) {
+            predictionsMap[symbol] = prediction;
+          }
+        });
+        
+        setPredictions(predictionsMap);
+        
+        // Obtener portafolio
+        try {
+          const portfolioData = await portfolioService.getPortfolio();
+          setPortfolio(portfolioData);
+        } catch (err) {
+          console.error('Error fetching portfolio:', err);
+          // Crear un portafolio por defecto en caso de error
+          setPortfolio(null);
+        }
+        
+        // Obtener órdenes
+        try {
+          const ordersData = await portfolioService.getOrders();
+          setOrders(ordersData);
+        } catch (err) {
+          console.error('Error fetching orders:', err);
+          setOrders([]);
+        }
+        
+      } catch (err) {
+        console.error('Error initializing trading data:', err);
+        setError('Error al cargar los datos iniciales. Por favor, recarga la página.');
+      } finally {
+        setIsLoading(false);
+      }
+    };
+    
+    fetchInitialData();
+    
+    // Cleanup
+    return () => {
+      // Código de limpieza si es necesario
+    };
+  }, []);
+
+  // Actualizar datos de mercado cuando cambia el símbolo seleccionado
+  useEffect(() => {
+    if (selectedSymbol) {
+      fetchMarketData(selectedSymbol).catch(console.error);
+      fetchPrediction(selectedSymbol).catch(console.error);
+    }
+  }, [selectedSymbol]);
 
   // Valor del contexto
   const value: TradingContextType = {
@@ -189,7 +254,8 @@ export const TradingProvider: React.FC<TradingProviderProps> = ({ children }) =>
     fetchMarketData,
     fetchPrediction,
     refreshPortfolio,
-    refreshMetrics
+    refreshMetrics,
+    refreshModelsStatus
   };
 
   return (

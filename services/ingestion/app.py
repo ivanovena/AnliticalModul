@@ -12,6 +12,7 @@ from threading import Thread
 import asyncio
 import websockets
 from flask import Flask, jsonify, request
+from flask_cors import CORS
 
 # Configurar logging
 logging.basicConfig(
@@ -51,6 +52,7 @@ except Exception as e:
 
 # Inicializar app Flask para API REST
 app = Flask(__name__)
+CORS(app, resources={r"/api/*": {"origins": "*"}})  # Habilitar CORS para todas las rutas /api/
 
 # --- WebSocket Server --- 
 connected_clients = set()

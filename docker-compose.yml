@@ -208,46 +208,8 @@ services:
     networks:
       - trading_network
 
-  # FRONTEND CON NGINX
-  frontend:
-    build:
-      context: ./web
-      dockerfile: Dockerfile
-    ports:
-      - "80:80"
-    depends_on:
-      - ingestion
-      - broker
-      - streaming
-    networks:
-      - project7_network
-    restart: always
-    healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost/healthcheck.html", "||", "exit", "1"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-    depends_on:
-      - broker
-      - streaming
-    ports:
-      - "80:80"
-    volumes:
-      - ./web/nginx/nginx.conf:/etc/nginx/conf.d/default.conf
-    environment:
-      - NGINX_HOST=localhost
-      - NGINX_PORT=80
-    networks:
-      - trading_network
-    healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost/healthcheck.html || exit 1"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 30s
-
 volumes:
   kafka_data:
-  broker_models:
+  redis_data:
   models_data:
-  redis_data:  # Volumen para persistencia de datos de Redis
+  broker_models:

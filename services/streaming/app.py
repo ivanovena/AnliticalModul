@@ -14,6 +14,8 @@ import threading
 import asyncio
 import websockets
 import os
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 
 # Importar nuestros modelos personalizados primero para evitar errores
 from custom_models import ALMARegressor
@@ -22,17 +24,36 @@ import river.linear_model
 river.linear_model.ALMARegressor = ALMARegressor
 
 # Servidor web para health check
-app = Flask(__name__)
+app = FastAPI(
+    title="Streaming Service API",
+    description="Servicio de streaming para predicciones en tiempo real",
+    version="1.0.0"
+)
 
-@app.route('/health')
+# Configurar CORS para permitir peticiones desde el frontend
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Permitir todos los orígenes
+    allow_credentials=True,
+    allow_methods=["*"],  # Permitir todos los métodos
+    allow_headers=["*"],  # Permitir todos los encabezados
+)
+
+# Métricas de salud del servicio
+health_metrics = {
+    'eventos_procesados': 0,
+    'predicciones_enviadas': 0,
+    'errores': 0,
+    'ultimo_evento': None,
+    'estado': 'healthy'
+}
+
+@app.get('/health')
 def health_check():
-    return jsonify({
-        "status": "healthy",
-        "metrics": health_metrics
-    })
+    return {"status": "healthy", "metrics": health_metrics}
 
-@app.route('/prediction/history/<symbol>')
-def get_prediction_history(symbol):
+@app.get('/prediction/history/{symbol}')
+def get_prediction_history(symbol: str):
     """
     Endpoint para obtener historial de verificaciones de predicciones para un símbolo
     """
@@ -98,13 +119,13 @@ def get_prediction_history(symbol):
                     "errorPct": round(error_pct, 2)
                 })
         
-        return jsonify(history)
+        return history
     except Exception as e:
         logger.error(f"Error obteniendo historial de predicciones para {symbol}: {e}")
-        return jsonify({"error": f"Error interno: {str(e)}"}), 500
+        raise HTTPException(status_code=500, detail=f"Error interno: {str(e)}")
 
-@app.route('/prediction/<symbol>')
-def get_prediction(symbol):
+@app.get('/prediction/{symbol}')
+def get_prediction(symbol: str):
     """
     Endpoint para obtener predicciones para un símbolo con diferentes horizontes temporales
     """
@@ -191,13 +212,14 @@ def get_prediction(symbol):
             "modelMetrics": model_metrics  # Camel case para el frontend
         }
         
-        return jsonify(response)
+        return response
     except Exception as e:
         logger.error(f"Error obteniendo predicción para {symbol}: {e}")
-        return jsonify({"error": f"Error interno: {str(e)}"}), 500
+        raise HTTPException(status_code=500, detail=f"Error interno: {str(e)}")
 
 def run_health_server():
-    app.run(host='0.0.0.0', port=8090)
+    import uvicorn
+    uvicorn.run(app, host='0.0.0.0', port=8090)
 
 # Configuración de logging
 logging.basicConfig(
@@ -571,15 +593,6 @@ def send_prediction_to_kafka(prediction_event):
     except Exception as e:
         logger.error(f"Error enviando predicción: {e}")
         return False
-
-# Métricas de salud del servicio
-health_metrics = {
-    'eventos_procesados': 0,
-    'predicciones_enviadas': 0,
-    'errores': 0,
-    'ultimo_evento': None,
-    'estado': 'healthy'
-}
 
 # --- WebSocket Server --- 
 connected_prediction_clients = set()

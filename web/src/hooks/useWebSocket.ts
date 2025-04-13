@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
+import { socketService } from '../services/api';
 
 interface UseWebSocketOptions {
   onMessage?: (data: any) => void;
@@ -154,7 +155,7 @@ export const useWebSocket = (url: string, options: UseWebSocketOptions = {}) => 
  * Hook para suscribirse a los datos de mercado en tiempo real
  */
 export const useMarketDataWebSocket = (symbol: string, onData?: (data: any) => void) => {
-  const wsUrl = process.env.REACT_APP_MARKET_WS_URL || `ws://localhost:8088/ws/market`;
+  const wsUrl = socketService.getMarketDataSocketUrl();
   
   const handleMessage = useCallback((data: any) => {
     // Verificar si los datos son para el símbolo que nos interesa
@@ -174,7 +175,7 @@ export const useMarketDataWebSocket = (symbol: string, onData?: (data: any) => v
  * Hook para suscribirse a las predicciones en tiempo real
  */
 export const usePredictionsWebSocket = (symbol: string, onData?: (data: any) => void) => {
-  const wsUrl = process.env.REACT_APP_PREDICTIONS_WS_URL || `ws://localhost:8091/ws/predictions`;
+  const wsUrl = socketService.getPredictionsSocketUrl();
   
   const handleMessage = useCallback((data: any) => {
     // Verificar si los datos son para el símbolo que nos interesa
@@ -194,7 +195,7 @@ export const usePredictionsWebSocket = (symbol: string, onData?: (data: any) => 
  * Hook para suscribirse a las recomendaciones de trading en tiempo real
  */
 export const useRecommendationsWebSocket = (symbol: string, onData?: (data: any) => void) => {
-  const wsUrl = process.env.REACT_APP_RECOMMENDATIONS_WS_URL || `ws://localhost:8090/ws/recommendations`;
+  const wsUrl = socketService.getRecommendationsSocketUrl();
   
   const handleMessage = useCallback((data: any) => {
     // Verificar si los datos son para el símbolo que nos interesa o si son recomendaciones generales

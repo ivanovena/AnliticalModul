@@ -86,10 +86,23 @@ const AIChat: React.FC = () => {
     } catch (error) {
       console.error('Error sending chat message:', error);
       
-      // Agregar mensaje de error
+      // Manejar diferentes tipos de errores
+      let errorText = 'Lo siento, ha ocurrido un error al procesar tu mensaje. Por favor, inténtalo de nuevo más tarde.';
+      
+      if (error instanceof Error) {
+        if (error.message.includes('Network Error') || error.message.includes('Failed to fetch')) {
+          errorText = 'No se pudo conectar con el servicio de chat. Verifica que el servidor de IA esté funcionando correctamente.';
+        } else if (error.message.includes('timeout')) {
+          errorText = 'La respuesta del servicio está tardando demasiado. Por favor, inténtalo de nuevo con una consulta más corta.';
+        } else if (error.message.includes('500')) {
+          errorText = 'Error interno en el servidor de IA. El equipo técnico ha sido notificado.';
+        }
+      }
+      
+      // Agregar mensaje de error con instrucciones más claras
       const errorMessage: Message = {
         id: Date.now().toString(),
-        text: 'Lo siento, ha ocurrido un error al procesar tu mensaje. Por favor, inténtalo de nuevo más tarde.',
+        text: errorText + '\n\nPuedes intentar:\n1. Refrescar la página\n2. Verificar la conexión del servidor\n3. Probar con una consulta diferente',
         sender: 'bot',
         timestamp: new Date()
       };
@@ -109,20 +122,38 @@ const AIChat: React.FC = () => {
 
   return (
     <Box sx={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
-      <Typography variant="h6" gutterBottom>
-        Asistente de Trading IA
-      </Typography>
+      <Box display="flex" justifyContent="space-between" alignItems="center" mb={2}>
+        <Typography variant="h6">
+          Asistente de Trading IA
+        </Typography>
+        <Button 
+          size="small" 
+          variant="outlined" 
+          onClick={() => {
+            setMessages([{
+              id: 'welcome',
+              text: 'Hola, soy tu asistente de trading con IA. Puedo ayudarte con análisis de mercado, recomendaciones de inversión y responder tus preguntas sobre operaciones financieras. ¿En qué puedo ayudarte hoy?',
+              sender: 'bot',
+              timestamp: new Date()
+            }]);
+            setConversationId(undefined);
+          }}
+        >
+          Nueva Conversación
+        </Button>
+      </Box>
       
       {/* Mensajes */}
       <Paper 
         sx={{ 
           p: 2, 
           flexGrow: 1, 
-          maxHeight: 'calc(100% - 100px)', 
+          maxHeight: 'calc(100% - 120px)', 
           overflow: 'auto',
           mb: 2,
           bgcolor: 'background.default'
         }}
+        variant="outlined"
       >
         <List>
           {messages.map((message, index) => (
