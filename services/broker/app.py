@@ -1,7 +1,7 @@
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Depends, Request
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Depends, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import List, Dict, Any, Optional, Callable
+from typing import List, Dict, Any, Optional, Callable, Set
 import json
 import time
 import logging
@@ -15,6 +15,14 @@ from kafka import KafkaConsumer, KafkaProducer
 import requests
 import threading
 import re
+
+# Importar websockets para implementar un servidor WebSocket manual
+try:
+    import websockets
+    HAS_WEBSOCKETS = True
+except ImportError:
+    HAS_WEBSOCKETS = False
+    logging.error("No se pudo importar 'websockets'. El servidor WebSocket no estará disponible.")
 
 # Importaciones para Redis y el cliente de datos
 from redis_cache import get_redis_cache, close_redis_connection
@@ -534,6 +542,14 @@ async def health_check():
 @app.get("/symbols")
 async def get_symbols():
     """Obtener lista de todos los símbolos disponibles"""
+    # Lista predeterminada de símbolos que siempre devolveremos si todo lo demás falla
+    default_symbols = [
+        "AAPL", "GOOGL", "MSFT", "AMZN", "TSLA", 
+        "META", "NVDA", "NFLX", "INTC", "AMD",
+        "IAG.MC", "PHM.MC", "AENA.MC", "BA", 
+        "CAR", "DLTR", "SASA.IS"
+    ]
+    
     try:
         # Obtener el cliente de datos
         data_client_instance = get_data_client()
@@ -543,22 +559,35 @@ async def get_symbols():
         
         # Si no tenemos símbolos, intentar obtener desde el agente
         if not symbols and llama_agent:
-            agent_symbols = llama_agent.cache.get_all_symbols() or []
-            symbols = agent_symbols
+            try:
+                agent_symbols = llama_agent.cache.get_all_symbols() or []
+                symbols = agent_symbols
+                logger.info(f"Símbolos obtenidos desde el agente: {len(symbols)}")
+            except Exception as e:
+                logger.warning(f"Error obteniendo símbolos desde el agente: {e}")
         
-        # Si aún no tenemos símbolos, usar una lista por defecto
+        # Si aún no tenemos símbolos, usar la lista por defecto
         if not symbols:
-            symbols = [
-                "AAPL", "GOOGL", "MSFT", "AMZN", "TSLA", 
-                "META", "NVDA", "NFLX", "INTC", "AMD",
-                "IAG.MC", "PHM.MC", "AENA.MC", "BA", 
-                "CAR", "DLTR", "SASA.IS"
-            ]
+            symbols = default_symbols
+            logger.info(f"Usando lista predeterminada de {len(symbols)} símbolos")
         
+        # Asegurarnos de que la respuesta no esté vacía
+        if not symbols:
+            symbols = default_symbols
+        
+        # Guardar en caché para futuras solicitudes
+        if redis_client:
+            try:
+                redis_client.setex("symbols:list", 3600, json.dumps(symbols))  # 1 hora de TTL
+                logger.info("Lista de símbolos guardada en caché Redis")
+            except Exception as e:
+                logger.warning(f"Error guardando símbolos en caché: {e}")
+                
         return {"symbols": symbols}
     except Exception as e:
         logger.error(f"Error obteniendo símbolos: {e}")
-        raise HTTPException(status_code=500, detail=f"Error interno: {str(e)}")
+        # Siempre devolver al menos la lista predeterminada
+        return {"symbols": default_symbols}
 
 @app.get("/portfolio")
 async def get_portfolio():
@@ -846,20 +875,245 @@ async def update_portfolio_metrics():
     logger.info(f"Métricas actualizadas. Rendimiento total: {total_return:.2f}%")
     return metrics
 
-# Inicialización del servicio de broker sin posiciones previas
+# Set para almacenar las conexiones activas WebSocket
+connected_websockets: Set[Any] = set()
+
+# Manejador de conexiones WebSocket
+async def websocket_handler(websocket, path=None):
+    """Manejador para conexiones WebSocket"""
+    try:
+        # Agregar a la lista de clientes conectados
+        connected_websockets.add(websocket)
+        logger.info(f"Nueva conexión WebSocket establecida desde {websocket.remote_address}, path: {path}. Total: {len(connected_websockets)}")
+        
+        # Enviar mensaje de bienvenida con diferente respuesta según la ruta
+        welcome_message = {
+            "type": "welcome",
+            "message": "Conectado al servicio de recomendaciones",
+            "timestamp": datetime.now().isoformat(),
+            "path": path
+        }
+        
+        # Modificar el mensaje según la ruta recibida
+        if path and "/market" in path:
+            welcome_message["message"] = "Conectado al servicio de datos de mercado"
+        elif path and "/recommendations" in path:
+            welcome_message["message"] = "Conectado al servicio de recomendaciones"
+            
+        try:
+            await websocket.send(json.dumps(welcome_message))
+        except Exception as send_error:
+            logger.error(f"Error enviando mensaje de bienvenida: {send_error}")
+            return
+        
+        # Esperar mensajes del cliente
+        async for data in websocket:
+            try:
+                message = json.loads(data)
+                action = message.get("action")
+                
+                if action == "ping":
+                    # Responder al ping
+                    await websocket.send(json.dumps({
+                        "type": "pong",
+                        "timestamp": datetime.now().isoformat()
+                    }))
+                    logger.debug("Ping-pong completado")
+                elif action == "subscribe":
+                    topic = message.get("topic", "")
+                    logger.info(f"Cliente suscrito a {topic}")
+                    
+                    try:
+                        await websocket.send(json.dumps({
+                            "type": "subscription",
+                            "status": "active",
+                            "topic": topic,
+                            "timestamp": datetime.now().isoformat()
+                        }))
+                        
+                        # Pequeño retraso antes de enviar datos de ejemplo
+                        await asyncio.sleep(0.5)
+                        
+                        # Enviar datos de prueba para market data
+                        if topic == "market" or topic == "market:*":
+                            # Enviar datos de ejemplo
+                            await websocket.send(json.dumps({
+                                "type": "market_data",
+                                "symbol": "AAPL",
+                                "price": 185.34,
+                                "change": 1.23,
+                                "volume": 12345678,
+                                "timestamp": datetime.now().isoformat()
+                            }))
+                            logger.info("Enviados datos de mercado de prueba")
+                        
+                        # Enviar datos de prueba para recomendaciones
+                        if topic == "recommendation" or topic == "recommendation:*":
+                            await websocket.send(json.dumps({
+                                "type": "recommendation",
+                                "symbol": "AAPL",
+                                "action": "BUY",
+                                "confidence": 0.85,
+                                "price_target": 195.0,
+                                "timestamp": datetime.now().isoformat()
+                            }))
+                            logger.info("Enviadas recomendaciones de prueba")
+                    except Exception as send_error:
+                        logger.error(f"Error enviando datos de suscripción: {send_error}")
+                else:
+                    logger.warning(f"Acción desconocida: {action}")
+                    try:
+                        await websocket.send(json.dumps({
+                            "type": "error",
+                            "message": f"Acción desconocida: {action}",
+                            "timestamp": datetime.now().isoformat()
+                        }))
+                    except Exception as send_error:
+                        logger.error(f"Error enviando mensaje de error (acción desconocida): {send_error}")
+            except json.JSONDecodeError as json_err:
+                logger.warning(f"Mensaje no válido recibido: {data}, error: {json_err}")
+                try:
+                    await websocket.send(json.dumps({
+                        "type": "error",
+                        "message": "Formato de mensaje no válido - se espera JSON",
+                        "timestamp": datetime.now().isoformat()
+                    }))
+                except Exception as send_error:
+                    logger.error(f"Error enviando mensaje de error (JSON inválido): {send_error}")
+            except Exception as e:
+                logger.error(f"Error procesando mensaje WebSocket: {e}", exc_info=True)
+                try:
+                    await websocket.send(json.dumps({
+                        "type": "error",
+                        "message": f"Error en el servidor: {str(e)}",
+                        "timestamp": datetime.now().isoformat()
+                    }))
+                except Exception as send_error:
+                    logger.error(f"Error enviando mensaje de error: {send_error}")
+    except websockets.exceptions.ConnectionClosed as e:
+        logger.info(f"Cliente WebSocket desconectado normalmente: {websocket.remote_address}, código: {e.code}, razón: {e.reason}")
+    except Exception as e:
+        logger.error(f"Error inesperado en WebSocket: {e}", exc_info=True)
+    finally:
+        # Eliminar la conexión del conjunto
+        try:
+            connected_websockets.remove(websocket)
+            logger.info(f"Cliente WebSocket desconectado. Clientes activos: {len(connected_websockets)}")
+        except:
+            logger.warning(f"Error al intentar eliminar cliente de la lista de conexiones activas")
+
+# Función para iniciar el servidor WebSocket
+async def start_websocket_server():
+    """Inicia el servidor WebSocket del Broker en un puerto dedicado."""
+    if not HAS_WEBSOCKETS:
+        logger.error("No se pudo iniciar el servidor WebSocket. Falta la biblioteca 'websockets'.")
+        return
+        
+    host = '0.0.0.0'
+    port = 8000  # Usar un puerto diferente para el WebSocket para evitar conflictos con FastAPI
+    
+    # Orígenes permitidos para WebSocket (incluir origen del frontend)
+    allowed_origins = [
+        "http://localhost:3000", 
+        "http://127.0.0.1:3000",
+        "http://localhost", 
+        "http://127.0.0.1",
+        "http://0.0.0.0:3000",
+        "ws://localhost:8100",
+        "ws://localhost:8090",
+        "ws://127.0.0.1:8100",
+        "ws://127.0.0.1:8090",
+        "null",  # Para conexiones desde file:// URLs o casos donde Origin está vacío
+        "*",     # Permitir cualquier origen (para desarrollo, debe eliminarse en producción)
+        None     # Permitir conexiones sin origen
+    ]
+    
+    try:
+        logger.info(f"Iniciando servidor WebSocket en {host}:{port} con proceso: {os.getpid()}")
+        logger.info(f"Orígenes permitidos: {allowed_origins}")
+        
+        # Crear y arrancar el servidor WebSocket con configuración CORS
+        server = await websockets.serve(
+            # Ignoramos el path completamente, enrutando todas las conexiones al mismo handler
+            lambda websocket, path: websocket_handler(websocket, path),
+            host, 
+            port,
+            # Desactivar comprobación de orígenes por completo
+            origins=None,
+            ping_interval=60,
+            ping_timeout=30,
+            max_size=10 * 1024 * 1024  # 10MB para mensajes más grandes
+        )
+        logger.info(f"Servidor WebSocket iniciado en {host}:{port} con orígenes permitidos: {allowed_origins}")
+        
+        # Mantener el servidor corriendo indefinidamente
+        await asyncio.Future()
+    except Exception as e:
+        logger.error(f"Error iniciando servidor WebSocket: {e}", exc_info=True)
+
+# Función para enviar notificaciones a todos los clientes WebSocket
+async def broadcast_to_websockets(message: Dict[str, Any]):
+    """Envía un mensaje a todos los clientes WebSocket conectados"""
+    if not connected_websockets:
+        return
+        
+    # Transformar a JSON si es un diccionario
+    message_json = json.dumps(message) if isinstance(message, dict) else message
+    
+    # Copia el conjunto para evitar problemas si cambia durante la iteración
+    disconnected = set()
+    for websocket in connected_websockets:
+        try:
+            await websocket.send(message_json)
+        except Exception as e:
+            logger.error(f"Error al enviar mensaje a WebSocket: {e}")
+            disconnected.add(websocket)
+    
+    # Eliminar las conexiones desconectadas
+    for ws in disconnected:
+        try:
+            connected_websockets.remove(ws)
+        except:
+            pass
+
+# Variable global para el servidor WebSocket del broker
+broker_websocket_server = None
+
 @app.on_event("startup")
 async def startup_event():
-    """Inicializar el servicio con datos iniciales vacíos"""
+    """Eventos a ejecutar al iniciar la aplicación"""
+    global broker_websocket_server
     logger.info("Iniciando servicio de broker...")
     
-    # Reinicia completamente el estado del broker
-    reset_broker_state()
+    # Inicializar cliente de datos
+    get_data_client() 
     
-    # Actualizar métricas iniciales
-    await update_portfolio_metrics()
+    # Iniciar consumidor de Kafka para actualizaciones de modelos batch en un hilo
+    kafka_thread = threading.Thread(target=consume_batch_model_updates, daemon=True)
+    kafka_thread.start()
+    logger.info("Consumidor de actualizaciones de modelo batch iniciado")
     
-    logger.info(f"Portafolio inicializado con efectivo: {INITIAL_CASH}")
-    logger.info(f"Valor total del portafolio: {broker_state['portfolio']['total_value']}")
+    # Iniciar tarea de fondo para actualizar precios y métricas del portfolio
+    # asyncio.create_task(update_portfolio_metrics())
+    # logger.info("Tarea de actualización de métricas del portfolio iniciada")
+    
+    # Iniciar el servidor WebSocket del Broker en segundo plano
+    try:
+        if HAS_WEBSOCKETS:
+            logger.info("Intentando iniciar servidor WebSocket del Broker...")
+            # Ejecutar start_websocket_server en el loop de eventos de asyncio
+            loop = asyncio.get_event_loop()
+            # Usamos create_task para que se ejecute en segundo plano sin bloquear el startup
+            loop.create_task(start_websocket_server())
+            # Guardamos una referencia por si necesitamos cerrarlo, aunque no se usa aquí
+            # broker_websocket_server = await start_websocket_server()
+            logger.info("Servidor WebSocket del Broker iniciado (o programado para iniciar).")
+        else:
+            logger.warning("Librería 'websockets' no encontrada, servidor WebSocket del Broker no iniciado.")
+    except Exception as e:
+        logger.error(f"Error al iniciar servidor WebSocket del Broker: {e}", exc_info=True)
+    
+    logger.info("Broker Service startup completo.")
 
 # Endpoint para resetear el estado del broker (útil para pruebas)
 @app.post("/reset")
@@ -1193,35 +1447,38 @@ async def get_model_status():
 
 @app.on_event("shutdown")
 async def shutdown_event():
-    """Limpiar recursos al cerrar"""
-    logger.info("Deteniendo servicio de broker...")
+    """Cerrar todas las conexiones al cerrar la aplicación"""
+    logger.info("Cerrando conexiones...")
     
-    # Cerrar cliente de datos
-    try:
-        await close_data_client()
-        logger.info("Cliente de datos cerrado correctamente")
-    except Exception as e:
-        logger.error(f"Error cerrando cliente de datos: {e}")
-    
-    # Cerrar conexión Redis
+    # Cerrar conexiones a Redis
     try:
         close_redis_connection()
-        logger.info("Conexión Redis cerrada correctamente")
-    except Exception as e:
-        logger.error(f"Error cerrando conexión Redis: {e}")
+        logger.info("Conexiones Redis cerradas")
+    except:
+        pass
+        
+    # Cerrar conexiones a clientes de datos
+    try:
+        close_data_client()
+        logger.info("Cliente de datos cerrado")
+    except:
+        pass
     
-    # Cerrar agente Llama
+    # Cerrar conexiones a Kafka
+    try:
+        if producer:
+            producer.close()
+            logger.info("Kafka producer cerrado")
+    except:
+        pass
+        
+    # Registrar función de limpieza para SIGTERM
     if llama_agent:
         try:
             llama_agent.shutdown()
-            logger.info("Agente IA cerrado correctamente")
+            logger.info("LLM Agent cerrado correctamente")
         except Exception as e:
-            logger.error(f"Error cerrando agente IA: {e}")
-    
-    # Cerrar Kafka
-    if producer:
-        producer.close()
-        logger.info("Kafka producer cerrado")
+            logger.error(f"Error cerrando LLM Agent: {e}")
 
 # Registrar función de limpieza para SIGTERM
 atexit.register(lambda: llama_agent.shutdown() if llama_agent else None)

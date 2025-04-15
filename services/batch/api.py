@@ -259,43 +259,43 @@ model_details_template = """
         }
         .good {
             color: green;
-            font-weight: bold;
+            font-weight: bold.
         }
         .bad {
             color: red;
-            font-weight: bold;
+            font-weight: bold.
         }
         .model-card {
             border: 1px solid #ddd;
             border-radius: 5px;
             padding: 15px;
-            margin-bottom: 20px;
+            margin-bottom: 20px.
         }
         .tabs {
             display: flex;
             border-bottom: 1px solid #ddd;
-            margin-bottom: 20px;
+            margin-bottom: 20px.
         }
         .tab {
             padding: 10px 15px;
             cursor: pointer;
-            margin-right: 5px;
+            margin-right: 5px.
         }
         .tab.active {
             border: 1px solid #ddd;
             border-bottom: 1px solid white;
             border-radius: 5px 5px 0 0;
-            margin-bottom: -1px;
+            margin-bottom: -1px.
         }
         .tab-content {
-            display: none;
+            display: none.
         }
         .tab-content.active {
-            display: block;
+            display: block.
         }
         img {
             max-width: 100%;
-            height: auto;
+            height: auto.
         }
         .btn {
             padding: 8px 12px;
@@ -307,16 +307,16 @@ model_details_template = """
             text-decoration: none;
             font-size: 14px;
             display: inline-block;
-            margin-right: 10px;
+            margin-right: 10px.
         }
         .btn:hover {
-            background-color: #2980b9;
+            background-color: #2980b9.
         }
         .btn-back {
-            background-color: #7f8c8d;
+            background-color: #7f8c8d.
         }
         .btn-back:hover {
-            background-color: #95a5a6;
+            background-color: #95a5a6.
         }
     </style>
 </head>
@@ -676,6 +676,17 @@ def predict_api(symbol):
 def serve_static(path):
     """Sirve archivos estáticos desde MODEL_OUTPUT_PATH"""
     return send_file(os.path.join(MODEL_OUTPUT_PATH, path))
+
+@app.route('/health')
+def health_check():
+    """
+    Endpoint para verificación de salud del servicio
+    """
+    return jsonify({
+        "status": "healthy",
+        "service": "batch_service",
+        "timestamp": datetime.datetime.now().isoformat()
+    })
 
 # Punto de entrada para ejecución como servicio
 def serve_api():

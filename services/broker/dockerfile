@@ -23,6 +23,9 @@ ENV CMAKE_ARGS="-DLLAMA_CUBLAS=OFF"
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Instalar explícitamente uvicorn con extras para WebSocket
+RUN pip install --no-cache-dir "uvicorn[standard]" websockets wsproto
+
 # Copiar código
 COPY . .
 
@@ -37,5 +40,5 @@ EXPOSE 8001
 # Configurar memoria para la JVM
 ENV JAVA_OPTS="-Xms256m -Xmx1g"
 
-# Iniciar servicio
+# Iniciar servicio con soporte para WebSocket
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8001"]

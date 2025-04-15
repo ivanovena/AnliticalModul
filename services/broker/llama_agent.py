@@ -1167,20 +1167,23 @@ class LlamaAgent:
                 sentiment_recommendation = sentiment.get("recommendation", "NEUTRAL")
                 
                 reasoning.append(f"Sentimiento de mercado: {sentiment_recommendation} (score: {sentiment_score:.2f})")
-                
+
                 # Ajustar confianza y predicción según el sentimiento
-                if abs(sentiment_score) > 30:
+                # Asegurémonos que sentiment_score es realmente un número
+                if isinstance(sentiment_score, (int, float)) and abs(sentiment_score) > 30: # Comparación numérica
                     # Si el sentimiento es fuerte, ajustar la confianza y la predicción
                     confidence = (confidence + 0.8) / 2  # Promedio con alta confianza
                     prediction = (prediction + sentiment_score/100) / 2  # Ajustar predicción
-                    
+
                     # Si el sentimiento contradice fuertemente el análisis técnico, ajustar acción
-                    if sentiment_score > 30 and action == "SELL":
+                    if sentiment_score > 30 and action == "SELL": # Comparación numérica
                         action = "HOLD"
                         reasoning.append("Señal mixta: Sentimiento positivo contradice análisis técnico bajista.")
-                    elif sentiment_score < -30 and action == "BUY":
+                    elif sentiment_score < -30 and action == "BUY": # Comparación numérica
                         action = "HOLD"
                         reasoning.append("Señal mixta: Sentimiento negativo contradice análisis técnico alcista.")
+                elif not isinstance(sentiment_score, (int, float)):
+                     logger.warning(f"Tipo inesperado para sentiment_score para {symbol}: {type(sentiment_score)}, valor: {sentiment_score}")
             
             # 3. Considerar datos fundamentales
             if metrics:

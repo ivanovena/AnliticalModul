@@ -38,3 +38,6 @@ ratelimit==2.2.1
 pynacl==1.5.0
 # Dependencia para cliente HTTP asíncrono
 aiohttp==3.8.4
+# Dependencias para WebSocket
+websockets==12.0
+wsproto==1.2.0

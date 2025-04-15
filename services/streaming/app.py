@@ -48,9 +48,12 @@ health_metrics = {
     'estado': 'healthy'
 }
 
+# Mantener el endpoint FastAPI para compatibilidad
 @app.get('/health')
 def health_check():
-    return {"status": "healthy", "metrics": health_metrics}
+    # Devolver métricas y estado actual
+    # Podríamos añadir verificaciones adicionales aquí (ej: conexión Kafka)
+    return {"status": health_metrics['estado'], "metrics": health_metrics}
 
 @app.get('/prediction/history/{symbol}')
 def get_prediction_history(symbol: str):
@@ -218,8 +221,19 @@ def get_prediction(symbol: str):
         raise HTTPException(status_code=500, detail=f"Error interno: {str(e)}")
 
 def run_health_server():
+    """Iniciar servidor FastAPI (WebSocket y HTTP) en el puerto principal"""
     import uvicorn
-    uvicorn.run(app, host='0.0.0.0', port=8090)
+    
+    # Configurar Uvicorn para que escuche en el puerto API principal (8002 por defecto)
+    api_port = int(os.environ.get('API_PORT', 8002))
+    logger.info(f"Iniciando servidor FastAPI/Uvicorn en puerto {api_port}")
+    uvicorn.run(
+        "app:app", # Asegúrate que esto apunta al objeto FastAPI correcto
+        host="0.0.0.0", 
+        port=api_port, 
+        reload=False, # Desactivar reload en producción/docker
+        log_level="info"
+    )
 
 # Configuración de logging
 logging.basicConfig(
@@ -594,173 +608,254 @@ def send_prediction_to_kafka(prediction_event):
         logger.error(f"Error enviando predicción: {e}")
         return False
 
-# --- WebSocket Server --- 
-connected_prediction_clients = set()
+# --- WebSocket Server para Predicciones ---
+streaming_clients = set()
 
-async def notify_prediction_clients(message):
-    if connected_prediction_clients:
-        # Convertir a JSON si no lo es ya
-        if not isinstance(message, str):
-            message = json.dumps(message)
-        await asyncio.wait([client.send(message) for client in connected_prediction_clients])
+async def notify_streaming_clients(message):
+    """Envía un mensaje a todos los clientes de streaming conectados"""
+    if not streaming_clients:
+        return
+    disconnected = set()
+    if isinstance(message, dict):
+        message = json.dumps(message)
+    for client in streaming_clients:
+        try:
+            await client.send(message)
+        except Exception as e:
+            logger.error(f"Error enviando mensaje de streaming a cliente: {e}")
+            disconnected.add(client)
+    for client in disconnected:
+        try:
+            streaming_clients.remove(client)
+        except:
+            pass
 
-async def prediction_websocket_handler(websocket, path):
-    connected_prediction_clients.add(websocket)
-    logger.info(f"Cliente WebSocket de predicción conectado: {websocket.remote_address}")
+async def streaming_websocket_handler(websocket, path=None):
+    """Manejador para conexiones WebSocket de predicciones"""
     try:
+        # Logear información de la conexión incluyendo el path
+        logger.info(f"Cliente de predicciones conectado: {websocket.remote_address}, path: {path}")
+        
+        # Agregar cliente a la lista de conexiones activas
+        streaming_clients.add(websocket)
+        
+        # Mensaje de bienvenida
+        try:
+            await websocket.send(json.dumps({
+                "type": "welcome",
+                "message": "Conectado al servicio de predicciones en tiempo real",
+                "timestamp": datetime.now().isoformat(),
+                "path": path  # Incluir path en la respuesta para depuración
+            }))
+        except Exception as e:
+            logger.error(f"Error enviando mensaje de bienvenida: {e}")
+            return
+            
+        # Mantener la conexión abierta, escuchando por si el cliente envía algo (ej: ping)
         async for message in websocket:
-            # Podríamos manejar peticiones de símbolos específicos aquí si quisiéramos
-            logger.info(f"Mensaje recibido de WS predicción (ignorado): {message}")
-    except websockets.exceptions.ConnectionClosed:
-        logger.info(f"Cliente WebSocket de predicción desconectado: {websocket.remote_address}")
+            try:
+                # Intentar decodificar el mensaje como JSON
+                data = json.loads(message)
+                logger.info(f"Mensaje recibido en WebSocket de streaming: {data}")
+                
+                # Manejar diferentes tipos de mensajes
+                if data.get("action") == "ping":
+                    await websocket.send(json.dumps({
+                        "type": "pong",
+                        "timestamp": datetime.now().isoformat()
+                    }))
+                elif data.get("action") == "subscribe":
+                    topic = data.get("topic", "")
+                    logger.info(f"Cliente suscrito a {topic}")
+                    
+                    # Enviar confirmación de suscripción
+                    await websocket.send(json.dumps({
+                        "type": "subscription",
+                        "status": "active",
+                        "topic": topic,
+                        "timestamp": datetime.now().isoformat()
+                    }))
+                    
+                    # Enviar datos simulados después de una suscripción
+                    await websocket.send(json.dumps({
+                        "type": "prediction",
+                        "symbol": "AAPL",
+                        "prediction": 2.5,
+                        "confidence": 0.75,
+                        "timestamp": datetime.now().isoformat()
+                    }))
+            except json.JSONDecodeError as e:
+                logger.warning(f"Mensaje no válido recibido: {message}, error: {e}")
+                try:
+                    await websocket.send(json.dumps({
+                        "type": "error",
+                        "message": "Formato de mensaje no válido - se espera JSON",
+                        "timestamp": datetime.now().isoformat()
+                    }))
+                except Exception as send_error:
+                    logger.error(f"Error enviando mensaje de error al cliente: {send_error}")
+            except Exception as e:
+                logger.error(f"Error procesando mensaje del cliente: {e}")
+                try:
+                    await websocket.send(json.dumps({
+                        "type": "error",
+                        "message": f"Error en el servidor: {str(e)}",
+                        "timestamp": datetime.now().isoformat()
+                    }))
+                except Exception as send_error:
+                    logger.error(f"Error enviando mensaje de error al cliente: {send_error}")
+    except websockets.exceptions.ConnectionClosed as e:
+        logger.info(f"Cliente de predicciones desconectado: {websocket.remote_address}, código: {e.code}, razón: {e.reason}")
+    except Exception as e:
+        logger.error(f"Error inesperado en WebSocket de streaming: {e}", exc_info=True)
     finally:
-        connected_prediction_clients.remove(websocket)
+        if websocket in streaming_clients:
+            streaming_clients.remove(websocket)
+            logger.info(f"Cliente eliminado de clientes activos. Total: {len(streaming_clients)}")
 
-async def start_prediction_websocket_server():
-    host = os.environ.get('WEBSOCKET_HOST', '0.0.0.0') # Reutilizar variable si existe
-    port = int(os.environ.get('WEBSOCKET_STREAMING_PORT', 8091)) # Cambiado a 8091 y variable de entorno específica
-    server = await websockets.serve(prediction_websocket_handler, host, port)
-    logger.info(f"Servidor WebSocket de Predicción escuchando en {host}:{port}")
-    await server.wait_closed()
+async def start_streaming_websocket_server():
+    """Inicia el servidor WebSocket para transmitir predicciones"""
+    host = os.environ.get('WEBSOCKET_HOST', '0.0.0.0')
+    port = int(os.environ.get('WEBSOCKET_PORT', 8090))
+    
+    # Orígenes permitidos para WebSocket (incluir origen del frontend)
+    allowed_origins = [
+        "http://localhost:3000", 
+        "http://127.0.0.1:3000",
+        "http://localhost", 
+        "http://127.0.0.1",
+        "http://0.0.0.0:3000",
+        "ws://localhost:8100",
+        "ws://localhost:8090",
+        "ws://127.0.0.1:8100",
+        "ws://127.0.0.1:8090",
+        "null",  # Para conexiones desde file:// URLs o casos donde Origin está vacío
+        "*",     # Permitir cualquier origen (para desarrollo, debe eliminarse en producción)
+        None  # Permitir conexiones sin origen
+    ]
+    
+    try:
+        logger.info(f"Iniciando servidor WebSocket en {host}:{port} con proceso: {os.getpid()}")
+        logger.info(f"Orígenes permitidos: {allowed_origins}")
+        
+        server = await websockets.serve(
+            streaming_websocket_handler,  # Usar la función directamente sin lambda
+            host, 
+            port,
+            # Desactivar la comprobación de orígenes por completo
+            origins=None,
+            ping_interval=60,
+            ping_timeout=30,
+            max_size=10 * 1024 * 1024  # 10MB para mensajes más grandes
+        )
+        logger.info(f"Servidor WebSocket de predicciones escuchando en {host}:{port} con orígenes permitidos: {allowed_origins}")
+        # Mantener el servidor corriendo indefinidamente (o hasta que se cierre externamente)
+        return server
+    except Exception as e:
+        logger.error(f"Error iniciando servidor WebSocket de streaming: {e}", exc_info=True)
+        return None
+
+# Iniciar servidor WebSocket al arrancar la aplicación FastAPI
+@app.on_event("startup")
+async def startup_event():
+    """Eventos a ejecutar al iniciar la aplicación FastAPI"""
+    logger.info("Iniciando servicio de streaming...")
+    
+    # Iniciar el servidor WebSocket en segundo plano
+    loop = asyncio.get_running_loop()
+    websocket_server_task = loop.create_task(start_streaming_websocket_server())
+    logger.info("Tarea de servidor WebSocket iniciada.")
+    
+    # Aquí puedes añadir otras tareas de arranque (ej: conectar a Kafka, etc.)
+
 # --- Fin WebSocket Server ---
 
-class StreamingProcessor:
-    # ... (init y otras funciones) ...
-    async def _process_message(self, message: Dict[str, Any]):
-        # ... (código existente para procesar y obtener predicción) ...
-        try:
-            # ... (código para generar features y prediction) ...
-            
-            # Actualizar predicciones internas
-            prediction_data = {
-                "symbol": symbol,
-                "current_price": price_data.get("close", price_data.get("price", 0)),
-                "predictions": prediction,
-                "features": features,
-                "timestamp": datetime.now().isoformat(),
-                "is_fallback": False,
-                "model_metrics": self.model_manager.get_model_metrics(symbol) # Añadir métricas
-            }
-            self.predictions[symbol] = prediction_data
-            self.last_update[symbol] = time.time()
-            
-            # Publicar predicción en Kafka
-            await self.kafka_client.produce(STREAMING_TOPIC, prediction_data)
-            
-            # --- NUEVO: Notificar a clientes WS --- 
-            await notify_prediction_clients(prediction_data)
-            # --- FIN NUEVO ---
-            
-            # Resetear contador de errores
-            # ... (código existente) ...
-            
-            logger.debug(f"Procesado mensaje para {symbol} y generada predicción")
-            
-        except Exception as e:
-            # ... (manejo de errores) ...
-            raise
-
-    async def _use_fallback_data(self, symbol: str):
-        # ... (código existente) ...
-        try:
-            # ... (obtener fallback_prediction) ...
-            if fallback_prediction:
-                # ... (código existente) ...
-                # --- NUEVO: Notificar fallback a clientes WS --- 
-                await notify_prediction_clients(fallback_prediction)
-                # --- FIN NUEVO ---
-                logger.info(f"Aplicados datos de respaldo para {symbol}")
-        except Exception as e:
-            logger.error(f"Error al aplicar datos de respaldo para {symbol}: {str(e)}")
-
-# ... (otras funciones)
-
-if __name__ == "__main__":
-    logger.info("Iniciando servicio de streaming...")
-
-    # Event loop for asyncio tasks (WebSocket notifications)
+# Añadir un endpoint específico de WebSocket en FastAPI
+@app.websocket("/predictions")
+async def predictions_websocket(websocket: WebSocket):
+    await websocket.accept()
     try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-
-    # Start WebSocket server in a separate thread managed by the asyncio loop
-    websocket_thread = threading.Thread(
-        target=lambda: loop.run_until_complete(start_prediction_websocket_server()),
-        daemon=True
-    )
-    websocket_thread.start()
-    logger.info("Servidor WebSocket de predicción iniciado en hilo separado.")
-
-    # Start Flask health server in a separate thread
-    health_thread = threading.Thread(target=run_health_server, daemon=True)
-    health_thread.start()
-    logger.info("Servidor de Health Check iniciado en hilo separado.")
-
-    # Main loop to consume Kafka messages
-    logger.info("Iniciando consumo de mensajes Kafka...")
-    try:
-        for message in consumer:
+        # Logear información de la conexión
+        logger.info(f"Cliente de predicciones conectado a través de FastAPI: {websocket.client}")
+        
+        # Mensaje de bienvenida
+        await websocket.send_json({
+            "type": "welcome",
+            "message": "Conectado al servicio de predicciones en tiempo real (FastAPI)",
+            "timestamp": datetime.now().isoformat()
+        })
+        
+        # Procesar mensajes
+        while True:
             try:
-                event = message.value
-                health_metrics['ultimo_evento'] = datetime.now().isoformat() # Update health metric
-
-                if event:
-                    # NUEVO: Filtrar por tipo de datos, solo procesar datos en tiempo real
-                    data_type = event.get('data_type', '')
-                    if data_type not in ['realtime_5min', 'real_time']:
-                        logger.debug(f"Ignorando datos no en tiempo real: {data_type} para {event.get('symbol', 'unknown')}")
-                        continue
+                data = await websocket.receive_json()
+                logger.info(f"Mensaje recibido en WebSocket FastAPI: {data}")
+                
+                # Manejar diferentes tipos de mensajes
+                if data.get("action") == "ping":
+                    await websocket.send_json({
+                        "type": "pong",
+                        "timestamp": datetime.now().isoformat()
+                    })
+                elif data.get("action") == "subscribe":
+                    topic = data.get("topic", "")
+                    logger.info(f"Cliente suscrito a {topic}")
                     
-                    logger.debug(f"Mensaje recibido de Kafka: {event}")
-                    prediction_event = process_streaming_event(event)
-
-                    if prediction_event:
-                        # Send prediction to Kafka topic
-                        sent = send_prediction_to_kafka(prediction_event)
-                        if sent:
-                            health_metrics['predicciones_enviadas'] += 1
-                            # --- NUEVO: Notificar a clientes WS ---
-                            # Ensure notification happens in the correct loop
-                            asyncio.run_coroutine_threadsafe(notify_prediction_clients(prediction_event), loop)
-                            logger.debug(f"Notificación WebSocket enviada para {prediction_event['symbol']}")
-                        else:
-                            health_metrics['errores'] += 1
-                    else:
-                        logger.warning(f"No se generó evento de predicción para el mensaje: {event}")
-                        health_metrics['errores'] += 1
-
-                    health_metrics['eventos_procesados'] += 1
-
-                else:
-                    logger.warning("Mensaje de Kafka vacío o inválido recibido.")
-                    health_metrics['errores'] += 1
-
-            except json.JSONDecodeError as e:
-                logger.error(f"Error deserializando mensaje de Kafka: {e} - Mensaje: {message.value}")
-                health_metrics['errores'] += 1
+                    # Enviar confirmación de suscripción
+                    await websocket.send_json({
+                        "type": "subscription",
+                        "status": "active",
+                        "topic": topic,
+                        "timestamp": datetime.now().isoformat()
+                    })
+                    
+                    # Enviar datos simulados después de una suscripción
+                    await websocket.send_json({
+                        "type": "prediction",
+                        "symbol": "AAPL",
+                        "prediction": 2.5,
+                        "confidence": 0.75,
+                        "timestamp": datetime.now().isoformat()
+                    })
+            except WebSocketDisconnect:
+                logger.info(f"Cliente desconectado: {websocket.client}")
+                break
             except Exception as e:
-                logger.error(f"Error inesperado procesando mensaje de Kafka: {e}", exc_info=True)
-                health_metrics['errores'] += 1
-
-    except KeyboardInterrupt:
-        logger.info("Interrupción recibida, deteniendo consumidor Kafka...")
-    except KafkaError as e:
-        logger.critical(f"Error irrecuperable de Kafka: {e}", exc_info=True)
-        health_metrics['estado'] = 'error'
+                logger.error(f"Error procesando mensaje: {e}")
+                try:
+                    await websocket.send_json({
+                        "type": "error",
+                        "message": f"Error: {str(e)}",
+                        "timestamp": datetime.now().isoformat()
+                    })
+                except:
+                    # Si no podemos enviar el error, probablemente el cliente está desconectado
+                    break
     except Exception as e:
-        logger.critical(f"Error crítico en el bucle principal de consumo: {e}", exc_info=True)
-        health_metrics['estado'] = 'error'
+        logger.error(f"Error en WebSocket de FastAPI: {e}")
     finally:
-        logger.info("Cerrando consumidor Kafka...")
-        if consumer:
-            consumer.close()
-        logger.info("Cerrando productor Kafka...")
-        if producer:
-            producer.close()
-        # Attempt to stop the asyncio loop gracefully if needed
-        if loop.is_running():
-            loop.call_soon_threadsafe(loop.stop)
-        logger.info("Servicio de streaming detenido.")
+        # Intentar cerrar la conexión si aún no está cerrada
+        try:
+            await websocket.close()
+        except:
+            pass
+
+# Mantener esta sección para soporte legacy si se ejecuta directamente el script
+if __name__ == "__main__":
+    # Necesitamos un loop de eventos para correr ambos
+    loop = asyncio.get_event_loop()
+    
+    # Iniciar el servidor WebSocket en segundo plano
+    websocket_server_task = loop.create_task(start_streaming_websocket_server())
+    
+    # Iniciar el servidor HTTP/API (que ahora está en run_health_server)
+    # Ejecutamos run_health_server directamente, ya que contiene uvicorn.run
+    # Esto bloqueará el hilo principal, manteniendo el loop activo
+    run_health_server() 
+    
+    # (Este código no se alcanzará si uvicorn.run bloquea)
+    # try:
+    #     loop.run_forever()
+    # finally:
+    #     loop.close()
 

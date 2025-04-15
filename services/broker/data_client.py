@@ -145,7 +145,7 @@ class DataClient:
                 return {}
                 
             # Intentar obtener desde el servicio de ingestion usando el endpoint REST
-            url = f"{self.ingestion_url}/api/market-data/{symbol}"
+            url = f"{self.ingestion_url}/market-data/{symbol}"
             session = await self._get_aiohttp_session()
             
             # Realizar solicitud con reintentos
@@ -170,8 +170,8 @@ class DataClient:
                         elif response.status == 404:
                             # El API endpoint podría no ser correcto
                             logger.warning(f"Error 404: Endpoint no encontrado. Verificar URL: {url}")
-                            # Intentar con una URL alternativa sin el prefijo /api
-                            url = f"{self.ingestion_url}/market-data/{symbol}"
+                            # Intentar con una URL alternativa con el prefijo /api
+                            url = f"{self.ingestion_url}/api/market-data/{symbol}"
                             # Continuamos para probar con la URL alternativa
                         else:
                             logger.warning(f"Error obteniendo datos de mercado para {symbol} desde ingestion: {response.status}")
@@ -196,7 +196,7 @@ class DataClient:
             
             # Intentar una verificación de salud del servicio para diagnosticar problemas
             try:
-                health_url = f"{self.ingestion_url}/api/health"
+                health_url = f"{self.ingestion_url}/health"
                 async with session.get(health_url) as health_response:
                     if health_response.status == 200:
                         health_data = await health_response.json()
@@ -279,7 +279,7 @@ class DataClient:
         
         try:
             # Intentar obtener desde el servicio de ingestion
-            url = f"{self.ingestion_url}/api/historical/{symbol}?timeframe={timeframe}&limit={limit}"
+            url = f"{self.ingestion_url}/historical/{symbol}?timeframe={timeframe}&limit={limit}"
             session = await self._get_aiohttp_session()
             
             # Realizar solicitud con reintentos
@@ -296,8 +296,8 @@ class DataClient:
                         elif response.status == 404:
                             # El API endpoint podría no ser correcto
                             logger.warning(f"Error 404: Endpoint no encontrado. Verificar URL: {url}")
-                            # Intentar con una URL alternativa sin el prefijo /api
-                            url = f"{self.ingestion_url}/historical/{symbol}?timeframe={timeframe}&limit={limit}"
+                            # Intentar con una URL alternativa con el prefijo /api
+                            url = f"{self.ingestion_url}/api/historical/{symbol}?timeframe={timeframe}&limit={limit}"
                             continue  # Probar con la URL alternativa
                         else:
                             logger.warning(f"Error obteniendo datos históricos para {symbol} desde ingestion: {response.status}")
@@ -846,26 +846,48 @@ class DataClient:
                     news_scores = [item.get("sentiment", {}).get("score", 0) for item in news if "sentiment" in item]
                     if news_scores:
                         sentiment["news_sentiment"] = round(sum(news_scores) / len(news_scores), 2)
+                logger.debug(f"[{symbol}] News Sentiment: {sentiment['news_sentiment']} (Type: {type(sentiment['news_sentiment'])})")
                 
                 # Analizar datos técnicos (tendencia reciente)
+                technical_sentiment_calculated = False
                 if historical_data and len(historical_data) > 1:
                     # Calcular tendencia de precios
-                    oldest_price = historical_data[-1].get("close", 0)
-                    newest_price = historical_data[0].get("close", 0)
+                    # Asegurar que los precios son numéricos
+                    try:
+                        oldest_price = float(historical_data[-1].get("close", 0))
+                    except (ValueError, TypeError):
+                        logger.warning(f"Precio histórico (close) no numérico para {symbol}: {historical_data[-1].get('close')}. Usando 0.")
+                        oldest_price = 0.0
+                    try:
+                        newest_price = float(historical_data[0].get("close", 0))
+                    except (ValueError, TypeError):
+                        logger.warning(f"Precio histórico (close) no numérico para {symbol}: {historical_data[0].get('close')}. Usando 0.")
+                        newest_price = 0.0
+                    logger.debug(f"[{symbol}] Oldest Price: {oldest_price} (Type: {type(oldest_price)}), Newest Price: {newest_price} (Type: {type(newest_price)})")
+
                     if oldest_price > 0:
                         price_change_pct = ((newest_price - oldest_price) / oldest_price) * 100
                         sentiment["technical_sentiment"] = round(price_change_pct * 5, 2)  # Escalar para que tenga más influencia
-                        
+                        technical_sentiment_calculated = True
                         # Añadir detalles
                         sentiment["details"]["price_change_pct"] = round(price_change_pct, 2)
+                logger.debug(f"[{symbol}] Technical Sentiment: {sentiment['technical_sentiment']} (Calculated: {technical_sentiment_calculated}, Type: {type(sentiment['technical_sentiment'])})")
                 
                 # Analizar volumen
+                volume_sentiment_calculated = False
                 if market_data and "volume" in market_data and historical_data and len(historical_data) > 1:
                     # Comparar volumen actual con promedio histórico
                     hist_volumes = [item.get("volume", 0) for item in historical_data]
                     avg_volume = sum(hist_volumes) / len(hist_volumes) if hist_volumes else 0
-                    current_volume = float(market_data.get("volume", 0))
-                    
+                    # Asegurar que current_volume es numérico
+                    try:
+                        # Intentar convertir a float, manejar posible ValueError
+                        current_volume = float(market_data.get("volume", 0))
+                    except (ValueError, TypeError):
+                        logger.warning(f"Volumen no numérico para {symbol}: {market_data.get('volume')}. Usando 0.")
+                        current_volume = 0.0
+                    logger.debug(f"[{symbol}] Current Volume: {current_volume} (Type: {type(current_volume)}), Avg Volume: {avg_volume} (Type: {type(avg_volume)})")
+
                     if avg_volume > 0:
                         volume_ratio = current_volume / avg_volume
                         # Si volumen es mayor que el promedio y precio subió, es positivo
@@ -874,11 +896,12 @@ class DataClient:
                             volume_sentiment = (volume_ratio - 1) * 30  # Factor de escala
                         else:
                             volume_sentiment = (1 - volume_ratio) * 30
-                            
+
                         sentiment["volume_sentiment"] = round(max(min(volume_sentiment, 100), -100), 2)
-                        
+                        volume_sentiment_calculated = True
                         # Añadir detalles
                         sentiment["details"]["volume_ratio"] = round(volume_ratio, 2)
+                logger.debug(f"[{symbol}] Volume Sentiment: {sentiment['volume_sentiment']} (Calculated: {volume_sentiment_calculated}, Type: {type(sentiment['volume_sentiment'])})")
                 
                 # Calcular puntuación general (ponderada)
                 weights = {
@@ -894,6 +917,7 @@ class DataClient:
                 )
                 
                 sentiment["overall_score"] = round(overall_score, 2)
+                logger.debug(f"[{symbol}] Overall Score: {sentiment['overall_score']} (Type: {type(sentiment['overall_score'])})")
                 
                 # Determinar recomendación
                 if sentiment["overall_score"] > 30:
@@ -906,6 +930,7 @@ class DataClient:
                     sentiment["recommendation"] = "SELL"
                 else:
                     sentiment["recommendation"] = "NEUTRAL"
+                logger.debug(f"[{symbol}] Recommendation: {sentiment['recommendation']}")
                 
                 # Guardar en caché
                 self.redis.set(cache_key, sentiment, ttl=self.cache_ttl["sentiment"])
@@ -913,7 +938,8 @@ class DataClient:
                 return sentiment
                 
             except Exception as e:
-                logger.error(f"Error inesperado al analizar sentimiento para {symbol}: {e}")
+                # Incluir el traceback en el log para más detalle
+                logger.error(f"Error inesperado al analizar sentimiento para {symbol}: {e}", exc_info=True)
                 return {
                     "symbol": symbol,
                     "timestamp": datetime.now().isoformat(),

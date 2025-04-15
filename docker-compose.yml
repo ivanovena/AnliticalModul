@@ -27,6 +27,8 @@ services:
       - kafka_data:/bitnami/kafka
     networks:
       - trading_network
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
   # SERVICIO DE BASE DE DATOS (POSTGRES)
   postgres:
@@ -49,6 +51,8 @@ services:
       start_period: 10s
     networks:
       - trading_network
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
   # SERVICIO DE INGESTION DE DATOS
   ingestion:
@@ -65,6 +69,7 @@ services:
     ports:
       - "8000:8000"  # API de ingestion
       - "8080:8080"  # WebSocket para datos en tiempo real
+      - "5002:8000"  # Puerto adicional para el healthcheck
     environment:
       - POSTGRES_HOST=postgres
       - POSTGRES_PORT=5432
@@ -80,8 +85,17 @@ services:
       - WEBSOCKET_PORT=8080
       - PYTHONUNBUFFERED=1
       - DB_URI=postgresql://market_admin:postgres@postgres:5432/market_data
+      - CORS_ORIGINS=http://localhost:3000,http://127.0.0.1:3000
     networks:
       - trading_network
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
 
   # SERVICIO DE PROCESAMIENTO BATCH
   batch:
@@ -117,9 +131,10 @@ services:
       - BATCH_SCHEDULE=30 0 * * *  # Por defecto, ejecutar a medianoche:30
       - PYTHONUNBUFFERED=1
       - DB_URI=postgresql://market_admin:postgres@postgres:5432/market_data
-
     networks:
       - trading_network
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
   # SERVICIO DE PROCESAMIENTO STREAMING
   streaming:
@@ -147,8 +162,11 @@ services:
       - MAX_RETRIES=30
       - INITIAL_BACKOFF=2
       - PYTHONUNBUFFERED=1
+      - CORS_ORIGINS=http://localhost:3000,http://127.0.0.1:3000
     networks:
       - trading_network
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
   # SERVICIO BROKER (CENTRAL)
   broker:
@@ -166,6 +184,7 @@ services:
       - broker_models:/app/models
     ports:
       - "8001:8001"  # API del broker
+      - "8100:8000"  # WebSocket del broker (puerto 8000 del contenedor mapeado a 8100 del host)
     environment:
       - POSTGRES_HOST=postgres
       - POSTGRES_PORT=5432
@@ -182,9 +201,10 @@ services:
       - API_PORT=8001
       - PYTHONUNBUFFERED=1
       - DB_URI=postgresql://market_admin:postgres@postgres:5432/market_data
-      - INGESTION_SERVICE_URL=http://ingestion:8080
-      - STREAMING_SERVICE_URL=http://streaming:8090
+      - INGESTION_SERVICE_URL=http://ingestion:8000
+      - STREAMING_SERVICE_URL=http://streaming:8002
       - OLLAMA_URL=http://host.docker.internal:11434
+      - CORS_ORIGINS=http://localhost:3000,http://127.0.0.1:3000
     networks:
       - trading_network
     extra_hosts:
@@ -207,6 +227,8 @@ services:
       start_period: 5s
     networks:
       - trading_network
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
 volumes:
   kafka_data:

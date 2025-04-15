@@ -52,35 +52,111 @@ except Exception as e:
 
 # Inicializar app Flask para API REST
 app = Flask(__name__)
-CORS(app, resources={r"/api/*": {"origins": "*"}})  # Habilitar CORS para todas las rutas /api/
+# Configurar CORS para permitir todas las solicitudes, no solo las rutas /api/
+CORS(app, resources={r"/*": {"origins": "*"}})
 
 # --- WebSocket Server --- 
 connected_clients = set()
 
 async def notify_clients(message):
-    if connected_clients:
-        # Ensure the loop is running when sending messages
-        loop = asyncio.get_running_loop()
-        await asyncio.wait([loop.create_task(client.send(message)) for client in connected_clients])
+    """Envía un mensaje a todos los clientes conectados"""
+    if not connected_clients:
+        return
+        
+    # Usar un conjunto para las desconexiones para evitar modificar mientras iteramos
+    disconnected = set()
+    
+    # Convertir a JSON si es necesario
+    if isinstance(message, dict):
+        message = json.dumps(message)
+    
+    # Manejar cada cliente
+    for client in connected_clients:
+        try:
+            await client.send(message)
+        except Exception as e:
+            logging.error(f"Error enviando mensaje a cliente: {e}")
+            disconnected.add(client)
+    
+    # Eliminar las conexiones cerradas
+    for client in disconnected:
+        try:
+            connected_clients.remove(client)
+            logging.info(f"Cliente desconectado durante envío de mensaje")
+        except:
+            pass
 
-async def websocket_handler(websocket):
-    connected_clients.add(websocket)
-    logger.info(f"Cliente WebSocket conectado: {websocket.remote_address}")
+async def websocket_handler(websocket, path):
+    """Manejador de conexiones WebSocket"""
+    
+    # Verificar origen y aceptar conexiones desde cualquier origen
     try:
-        async for message in websocket:
-            # No se espera que los clientes envíen mensajes en este caso
-            logger.info(f"Mensaje recibido de WS (ignorado): {message}")
-    except websockets.exceptions.ConnectionClosed:
-        logger.info(f"Cliente WebSocket desconectado: {websocket.remote_address}")
-    finally:
-        connected_clients.remove(websocket)
+        connected_clients.add(websocket)
+        logging.info(f"Cliente WebSocket conectado: {websocket.remote_address}, path: {path}")
+        
+        # Enviar mensaje de bienvenida
+        await websocket.send(json.dumps({
+            "type": "welcome",
+            "message": "Conectado al servicio de datos de mercado",
+            "timestamp": datetime.now().isoformat()
+        }))
+        
+        try:
+            async for message in websocket:
+                try:
+                    data = json.loads(message)
+                    action = data.get("action", "")
+                    
+                    # Manejar ping/pong para mantener la conexión activa
+                    if action == "ping":
+                        await websocket.send(json.dumps({
+                            "type": "pong",
+                            "timestamp": datetime.now().isoformat()
+                        }))
+                    elif action == "subscribe":
+                        topic = data.get("topic", "")
+                        logging.info(f"Cliente suscrito a {topic}")
+                        await websocket.send(json.dumps({
+                            "type": "subscription",
+                            "status": "active", 
+                            "topic": topic,
+                            "timestamp": datetime.now().isoformat()
+                        }))
+                except json.JSONDecodeError:
+                    logging.warning(f"Mensaje no válido recibido: {message}")
+                except Exception as e:
+                    logging.error(f"Error procesando mensaje: {e}")
+        except websockets.exceptions.ConnectionClosed:
+            logging.info(f"Cliente WebSocket desconectado: {websocket.remote_address}")
+        except Exception as e:
+            logging.error(f"Error no esperado en WebSocket: {e}")
+        finally:
+            # Eliminar cliente de la lista al desconectarse
+            if websocket in connected_clients:
+                connected_clients.remove(websocket)
+    except Exception as e:
+        logging.error(f"Error no esperado en el manejo de WebSocket: {e}")
 
 async def start_websocket_server():
+    """Inicia el servidor WebSocket para transmitir datos en tiempo real"""
     host = os.environ.get('WEBSOCKET_HOST', '0.0.0.0')
-    port = int(os.environ.get('WEBSOCKET_PORT', 8088))  # Cambiado para no interferir con Flask
-    server = await websockets.serve(websocket_handler, host, port)
-    logger.info(f"Servidor WebSocket escuchando en {host}:{port}")
-    await server.wait_closed()
+    port = int(os.environ.get('WEBSOCKET_PORT', 8080))  # Cambiado a 8080 para coincidir con la configuración del frontend
+    
+    # Configuración mejorada con tiempo de ping/pong para evitar cierres inesperados
+    server = await websockets.serve(
+        websocket_handler, 
+        host, 
+        port,
+        ping_interval=30,       # Enviar ping cada 30 segundos
+        ping_timeout=10,        # Timeout de 10 segundos para respuestas ping
+        close_timeout=10,       # Esperar 10 segundos para cerrar conexiones
+        max_size=10_485_760,    # Permitir mensajes de hasta 10MB (para datos de mercado grandes)
+        max_queue=1024          # Cola mayor para mensajes
+    )
+    
+    logging.info(f"Servidor WebSocket escuchando en {host}:{port}")
+    return server
+
 # --- Fin WebSocket Server ---
 
 # REST API Endpoints
@@ -93,9 +169,9 @@ def get_version():
         "timestamp": datetime.now().isoformat()
     })
 
-@app.route('/api/health', methods=['GET'])
-def health_check():
-    """Endpoint para health check"""
+@app.route('/health', methods=['GET'])
+def root_health_check():
+    """Endpoint for health check at root path"""
     try:
         # Verificar conexión a la base de datos
         with engine.connect() as conn:
@@ -117,6 +193,12 @@ def health_check():
             "error": str(e),
             "timestamp": datetime.now().isoformat()
         }), 500
+
+# Mantener el endpoint original por compatibilidad
+@app.route('/api/health', methods=['GET'])
+def health_check():
+    """Endpoint para health check"""
+    return root_health_check()
 
 @app.route('/api/market-data/<symbol>', methods=['GET'])
 def get_market_data(symbol):
@@ -892,6 +974,25 @@ def historical_ingestion_thread():
         logger.info(f"Waiting {wait_time} seconds until next historical ingestion cycle")
         time.sleep(wait_time)
 
+# Función para enviar datos a los clientes WebSocket conectados
+async def broadcast_market_data(data):
+    """Transmite datos de mercado actualizados a todos los clientes conectados"""
+    
+    # Validar que tenemos datos para enviar
+    if not data:
+        return
+        
+    # Preparar el mensaje como una estructura JSON con información útil
+    message = {
+        "type": "market_data",
+        "data": data,
+        "timestamp": datetime.now().isoformat()
+    }
+    
+    # Enviar a todos los clientes conectados
+    await notify_clients(message)
+    logging.debug(f"Datos de mercado enviados a {len(connected_clients)} clientes WebSocket")
+
 if __name__ == "__main__":
     logger.info("Iniciando servicio de ingestión...")
     
@@ -915,8 +1016,12 @@ if __name__ == "__main__":
     realtime_thread.start()
     logger.info("Realtime ingestion thread started")
     
+    # Obtener puerto de API desde variables de entorno
+    api_port = int(os.environ.get('API_PORT', 8000))
+    
     # Iniciar servidor Flask en el hilo principal
-    app.run(host='0.0.0.0', port=8080)
+    logger.info(f"Starting Flask server on port {api_port}")
+    app.run(host='0.0.0.0', port=api_port)
     
     # Mantener el proceso principal vivo
     try:
