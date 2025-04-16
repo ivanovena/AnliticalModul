@@ -1,0 +1,488 @@
+# Product Requirements Document (PRD): Dashboard de Trading - Proyecto 7
+
+## Overview
+
+El Dashboard de Trading para el Proyecto 7 es una interfaz web centralizada para visualizar, monitorear y simular operaciones de trading basadas en las predicciones generadas por nuestros modelos de IA. Este dashboard conectará con los microservicios existentes (broker, ingestion, streaming, batch) para proporcionar una experiencia unificada que permitirá a los usuarios:
+
+1. Visualizar datos históricos y en tiempo real del mercado
+2. Comparar predicciones con valores reales
+3. Simular operaciones de trading con carteras virtuales
+4. Recibir y actuar sobre recomendaciones generadas por IA
+
+Este dashboard servirá como herramienta principal para validar la efectividad de nuestros algoritmos predictivos, permitiendo a los usuarios evaluar el rendimiento de las estrategias de trading antes de utilizarlas con dinero real.
+
+## Core Features
+
+### 1. Panel de Visualización de Mercado
+- **Descripción**: Visualización gráfica de datos históricos y en tiempo real del mercado, con capacidad para mostrar múltiples activos simultáneamente.
+- **Importancia**: Proporciona el contexto fundamental para tomar decisiones de trading y evaluar el rendimiento de las predicciones.
+- **Funcionalidades**:
+  - Gráficos de velas (candlestick) para visualización técnica
+  - Sobreposición de indicadores técnicos (MA, MACD, RSI, etc.)
+  - Visualización de volumen de trading
+  - Comparativa de múltiples activos
+  - Rangos de tiempo ajustables (1h, 4h, 1d, 1w, etc.)
+
+### 2. Seguimiento de Predicciones vs. Realidad
+- **Descripción**: Visualización comparativa de predicciones generadas por nuestros modelos frente a valores reales del mercado.
+- **Importancia**: Permite evaluar la precisión y fiabilidad de nuestros modelos predictivos.
+- **Funcionalidades**:
+  - Sobreposición de líneas de predicción en gráficos de precio
+  - Métricas de error (MAE, RMSE, precisión direccional)
+  - Historial de predicciones con análisis de aciertos/fallos
+  - Comparativa de rendimiento entre diferentes modelos
+
+### 3. Simulador de Trading
+- **Descripción**: Entorno virtual para simular operaciones de compra/venta de activos basados en predicciones o decisiones manuales.
+- **Importancia**: Permite probar estrategias sin riesgo financiero real y validar la rentabilidad potencial de las predicciones.
+- **Funcionalidades**:
+  - Creación y gestión de carteras virtuales
+  - Interfaz para ejecutar órdenes de compra/venta
+  - Historial de operaciones con P&L (Profit & Loss)
+  - Cálculo de métricas de rendimiento (Sharpe ratio, max drawdown, etc.)
+  - Comparativa con benchmarks (ej. S&P 500, BTC-USD, etc.)
+  - Simulación de estrategias automatizadas
+
+### 4. Centro de Recomendaciones IA
+- **Descripción**: Visualización de señales y recomendaciones de trading generadas por nuestros algoritmos de IA.
+- **Importancia**: Proporciona insights accionables basados en el análisis avanzado de datos.
+- **Funcionalidades**:
+  - Listado de recomendaciones actuales por activo
+  - Explicación detallada del razonamiento detrás de cada recomendación
+  - Histórico de recomendaciones con análisis de rendimiento
+  - Configuración de parámetros para personalizar las recomendaciones
+  - Alertas personalizables sobre nuevas oportunidades
+
+### 5. Monitor de Estado del Sistema
+- **Descripción**: Visualización del estado operativo de todos los microservicios y componentes del sistema.
+- **Importancia**: Permite identificar rápidamente problemas técnicos que puedan afectar al rendimiento.
+- **Funcionalidades**:
+  - Estado de salud de cada microservicio
+  - Métricas de rendimiento (latencia, uso de recursos, etc.)
+  - Logs de errores y advertencias
+  - Historial de actividad del sistema
+
+## User Experience
+
+### Personas de Usuario
+
+1. **Analista de Trading**
+   - Objetivos: Evaluar la precisión de las predicciones, analizar patrones de mercado, ajustar parámetros de los modelos
+   - Necesidades: Visualización detallada de datos, métricas de precisión, herramientas de análisis
+
+2. **Trader**
+   - Objetivos: Ejecutar operaciones basadas en predicciones, gestionar carteras virtuales, evaluar resultados
+   - Necesidades: Interfaz intuitiva para operaciones, visualización clara de señales, feedback inmediato
+
+3. **Desarrollador/Administrador**
+   - Objetivos: Monitorizar el estado del sistema, identificar problemas, optimizar rendimiento
+   - Necesidades: Acceso a logs, métricas técnicas, configuración avanzada
+
+### Flujos de Usuario Clave
+
+1. **Análisis de Mercado y Predicciones**
+   - Usuario accede al panel principal
+   - Selecciona activos y rangos de tiempo de interés
+   - Visualiza datos históricos y predicciones superpuestas
+   - Analiza métricas de precisión y ajusta parámetros de visualización
+   - Guarda configuraciones personalizadas para futuras sesiones
+
+2. **Simulación de Trading**
+   - Usuario crea o selecciona una cartera virtual
+   - Visualiza estado actual de la cartera (activos, valor, rendimiento)
+   - Ejecuta operaciones de compra/venta basadas en recomendaciones o análisis propio
+   - Monitoriza resultados en tiempo real y ajusta estrategia
+   - Analiza rendimiento histórico de la cartera
+
+3. **Gestión de Recomendaciones**
+   - Usuario accede al centro de recomendaciones
+   - Filtra recomendaciones por activo, tipo o confianza
+   - Analiza explicaciones detalladas y métricas asociadas
+   - Decide si actuar sobre las recomendaciones (manual o automáticamente)
+   - Configura alertas para futuras recomendaciones similares
+
+### Consideraciones UI/UX
+
+- **Diseño Responsive**: Adaptable a diferentes tamaños de pantalla (desktop, tablet)
+- **Temas Claro/Oscuro**: Opción de cambiar entre modos para diferentes entornos de trabajo
+- **Personalización**: Capacidad de ajustar layouts, widgets y dashboards según preferencias
+- **Notificaciones**: Sistema de alertas no intrusivas para eventos importantes
+- **Accesibilidad**: Contraste adecuado, compatibilidad con lectores de pantalla, navegación por teclado
+- **Rendimiento**: Optimización para actualización en tiempo real sin degradación del rendimiento
+
+## Technical Architecture
+
+### Componentes del Sistema
+
+1. **Frontend (React + TypeScript)**
+   - **Estructura**:
+     - `/dashboard`: Directorio principal en la raíz del proyecto
+     - `/dashboard/src`: Código fuente
+     - `/dashboard/public`: Recursos estáticos
+   - **Tecnologías**:
+     - React 18+ con Hooks y Context API
+     - TypeScript para type safety
+     - Redux o Zustand para gestión de estado
+     - Material-UI o Chakra UI para componentes
+     - D3.js o TradingView Lightweight Charts para visualizaciones
+     - Socket.io client para comunicación websocket
+     - Jest + React Testing Library para testing
+
+2. **Backend (Conexión con Microservicios)**
+   - Utiliza los servicios existentes:
+     - `broker`: API principal para operaciones y datos agregados
+     - `ingestion`: Datos históricos y en tiempo real
+     - `streaming`: Predicciones en tiempo real
+     - `batch`: Modelos y análisis histórico
+
+### Modelos de Datos
+
+1. **Market Data**
+   ```typescript
+   interface MarketData {
+     symbol: string;
+     timestamp: number;
+     open: number;
+     high: number;
+     close: number;
+     low: number;
+     volume: number;
+   }
+   ```
+
+2. **Prediction**
+   ```typescript
+   interface Prediction {
+     symbol: string;
+     timestamp: number;
+     predictedPrice: number;
+     confidence: number;
+     horizon: string; // '1h', '4h', '1d', etc.
+     modelId: string;
+   }
+   ```
+
+3. **Portfolio**
+   ```typescript
+   interface Portfolio {
+     id: string;
+     name: string;
+     initialCapital: number;
+     currentValue: number;
+     cash: number;
+     positions: Position[];
+     transactions: Transaction[];
+     createdAt: number;
+     updatedAt: number;
+   }
+   
+   interface Position {
+     symbol: string;
+     quantity: number;
+     averageEntryPrice: number;
+     currentPrice: number;
+   }
+   
+   interface Transaction {
+     id: string;
+     portfolioId: string;
+     symbol: string;
+     type: 'BUY' | 'SELL';
+     quantity: number;
+     price: number;
+     timestamp: number;
+     fees: number;
+     total: number;
+     basedOnPrediction?: string; // ID de la predicción si aplica
+   }
+   ```
+
+4. **Recommendation**
+   ```typescript
+   interface Recommendation {
+     id: string;
+     symbol: string;
+     action: 'BUY' | 'SELL' | 'HOLD';
+     confidence: number;
+     targetPrice: number;
+     stopLoss?: number;
+     takeProfit?: number;
+     reasoning: string;
+     timestamp: number;
+     expiresAt: number;
+     status: 'ACTIVE' | 'EXPIRED' | 'EXECUTED';
+   }
+   ```
+
+### APIs e Integraciones
+
+1. **REST APIs**
+   - `/api/market`: Datos de mercado (históricos, actuales)
+   - `/api/predictions`: Predicciones generadas por modelos
+   - `/api/portfolios`: Gestión de carteras virtuales
+   - `/api/transactions`: Historial de operaciones
+   - `/api/recommendations`: Recomendaciones de trading
+   - `/api/system`: Estado y métricas del sistema
+
+2. **WebSockets**
+   - `/ws/market`: Actualizaciones en tiempo real de precios
+   - `/ws/predictions`: Nuevas predicciones en tiempo real
+   - `/ws/portfolio`: Actualizaciones de carteras
+   - `/ws/recommendations`: Nuevas recomendaciones
+
+3. **Integraciones Externas**
+   - TradingView Charts (opcional)
+   - Telegram para notificaciones (ya configurado en .env)
+
+### Requisitos de Infraestructura
+
+1. **Servidor Nginx**
+   - Servir archivos estáticos
+   - Proxy inverso para APIs de backend
+   - Compresión gzip/brotli
+   - Configuración CORS
+
+2. **Contenedor Docker**
+   ```dockerfile
+   FROM node:18-alpine as build
+   WORKDIR /app
+   COPY package*.json ./
+   RUN npm install
+   COPY . .
+   RUN npm run build
+   
+   FROM nginx:alpine
+   COPY --from=build /app/build /usr/share/nginx/html
+   COPY nginx.conf /etc/nginx/conf.d/default.conf
+   EXPOSE 80
+   CMD ["nginx", "-g", "daemon off;"]
+   ```
+
+3. **Configuración en docker-compose.yml**
+   ```yaml
+   dashboard:
+     build:
+       context: ./dashboard
+       dockerfile: Dockerfile
+     container_name: ${COMPOSE_PROJECT_NAME:-project7}-dashboard-1
+     restart: always
+     ports:
+       - "3000:80"
+     environment:
+       - REACT_APP_API_URL=http://localhost
+       - REACT_APP_WS_URL=ws://localhost/ws
+       - REACT_APP_INITIAL_CASH=100000
+       - REACT_APP_ENABLE_TELEGRAM=${REACT_APP_ENABLE_TELEGRAM:-false}
+       - REACT_APP_ENABLE_NOTIFICATIONS=${REACT_APP_ENABLE_NOTIFICATIONS:-true}
+     depends_on:
+       - broker
+       - ingestion
+       - streaming
+     networks:
+       - trading_network
+     healthcheck:
+       test: ["CMD", "wget", "-q", "--spider", "http://localhost:80"]
+       interval: 30s
+       timeout: 10s
+       retries: 3
+       start_period: 20s
+   ```
+
+## Development Roadmap
+
+### Fase 1: MVP (Minimum Viable Product)
+
+1. **Configuración del Proyecto**
+   - Crear estructura de archivos y configuración inicial
+   - Implementar sistema de autenticación básico
+   - Configurar conexiones con servicios de backend
+
+2. **Panel de Visualización Básico**
+   - Implementar gráficos de precio básicos para un solo activo
+   - Mostrar datos históricos y en tiempo real
+   - Implementar controles básicos de rango temporal
+
+3. **Visualización de Predicciones Simple**
+   - Mostrar predicciones superpuestas en gráficos de precio
+   - Implementar métricas básicas de precisión
+   - Visualizar diferencias entre predicción y realidad
+
+4. **Simulador de Trading Básico**
+   - Implementar creación de cartera virtual única
+   - Desarrollar funcionalidad básica de compra/venta
+   - Mostrar balance y posiciones actuales
+
+5. **Interfaz de Usuario Fundamental**
+   - Diseñar layout principal y navegación
+   - Implementar tema oscuro/claro
+   - Desarrollar componentes reutilizables básicos
+
+### Fase 2: Mejoras Funcionales
+
+1. **Panel de Visualización Avanzado**
+   - Añadir múltiples indicadores técnicos
+   - Implementar comparativa de múltiples activos
+   - Mejorar controles de visualización y personalización
+
+2. **Seguimiento de Predicciones Mejorado**
+   - Implementar dashboard de precisión histórica
+   - Añadir comparativa entre diferentes modelos
+   - Desarrollar visualización de factores que influyen en las predicciones
+
+3. **Simulador de Trading Completo**
+   - Implementar múltiples carteras virtuales
+   - Añadir estrategias automatizadas basadas en señales
+   - Desarrollar análisis de rendimiento detallado
+
+4. **Centro de Recomendaciones**
+   - Implementar visualización de recomendaciones actuales
+   - Desarrollar historial de recomendaciones con análisis
+   - Añadir explicaciones detalladas basadas en IA
+
+5. **Monitor de Estado del Sistema**
+   - Implementar dashboard de estado de microservicios
+   - Añadir visualización de métricas de rendimiento
+   - Desarrollar sistema de alertas para problemas
+
+### Fase 3: Características Avanzadas
+
+1. **Optimización y Personalización**
+   - Implementar layouts personalizables (drag-and-drop)
+   - Añadir guardado de configuraciones de usuario
+   - Optimizar rendimiento para conjuntos de datos grandes
+
+2. **Backtesting de Estrategias**
+   - Desarrollar herramientas para probar estrategias en datos históricos
+   - Implementar comparativa de diferentes estrategias
+   - Añadir optimización paramétrica
+
+3. **Integración Social y Notificaciones**
+   - Implementar notificaciones por Telegram
+   - Añadir capacidad de compartir análisis y resultados
+   - Desarrollar sistema de alertas personalizable
+
+4. **Análisis Avanzado**
+   - Implementar herramientas estadísticas avanzadas
+   - Añadir visualización de correlaciones entre activos
+   - Desarrollar proyecciones de escenarios
+
+5. **Exportación e Informes**
+   - Implementar exportación de datos a CSV/Excel
+   - Añadir generación de informes periódicos
+   - Desarrollar visualización de datos para presentaciones
+
+## Logical Dependency Chain
+
+1. **Fundación (Semana 1)**
+   - Configuración del proyecto y entorno de desarrollo
+   - Conexiones básicas a APIs de backend
+   - Componentes UI fundamentales y sistema de routing
+
+2. **Visualización Básica (Semana 2)**
+   - Implementación de gráficos de precios
+   - Integración con datos en tiempo real (WebSockets)
+   - Layout principal y navegación
+
+3. **Funcionalidad Central (Semanas 3-4)**
+   - Visualización de predicciones vs. realidad
+   - Simulador de trading básico
+   - Panel de recomendaciones simple
+
+4. **Refinamiento (Semanas 5-6)**
+   - Mejora de la experiencia de usuario
+   - Ampliación de características de visualización
+   - Funcionalidades avanzadas de simulación
+
+5. **Funcionalidades Avanzadas (Semanas 7+)**
+   - Características de análisis estadístico
+   - Optimización de rendimiento
+   - Integraciones adicionales
+
+## Risks and Mitigations
+
+### Riesgos Técnicos
+
+1. **Rendimiento con Datos en Tiempo Real**
+   - **Riesgo**: Degradación del rendimiento con actualizaciones frecuentes
+   - **Mitigación**: 
+     - Implementar throttling y debouncing
+     - Utilizar WebWorkers para cálculos pesados
+     - Optimizar renders con React.memo y useMemo
+
+2. **Complejidad de Visualización**
+   - **Riesgo**: Gráficos complejos pueden causar problemas de rendimiento
+   - **Mitigación**:
+     - Utilizar bibliotecas optimizadas (TradingView Lightweight Charts)
+     - Implementar carga lazy y virtualización para grandes conjuntos de datos
+     - Limitar la cantidad de datos visualizados simultáneamente
+
+3. **Integración con Microservicios**
+   - **Riesgo**: Problemas de comunicación o incompatibilidad con APIs existentes
+   - **Mitigación**:
+     - Desarrollar capa de adaptación/facade para APIs
+     - Implementar retry patterns con backoff exponencial
+     - Crear mocks para desarrollo independiente
+
+### MVP Viable
+
+1. **Alcance Mínimo para Usabilidad**
+   - **Riesgo**: Desarrollar funcionalidades no esenciales antes de las básicas
+   - **Mitigación**:
+     - Priorizar rigurosamente las características del MVP
+     - Validar cada funcionalidad con casos de uso reales
+     - Enfocarse en el flujo principal antes de añadir características adicionales
+
+2. **Experiencia de Usuario**
+   - **Riesgo**: Interfaz compleja que dificulta la adopción
+   - **Mitigación**:
+     - Diseñar para simplicidad inicial con capacidad de expansión
+     - Realizar pruebas de usabilidad tempranas
+     - Implementar onboarding guiado
+
+### Recursos y Limitaciones
+
+1. **Optimización de Recursos**
+   - **Riesgo**: El dashboard consume demasiados recursos del cliente
+   - **Mitigación**:
+     - Implementar lazy loading de componentes y datos
+     - Optimizar tamaño del bundle con code splitting
+     - Utilizar servicios de backend para cálculos intensivos
+
+2. **Mantenibilidad del Código**
+   - **Riesgo**: Codebase difícil de mantener a medida que crece
+   - **Mitigación**:
+     - Implementar arquitectura modular con separación clara de responsabilidades
+     - Establecer estándares de código y documentación desde el inicio
+     - Utilizar TypeScript con tipado estricto
+
+## Appendix
+
+### Referencias Tecnológicas
+
+1. **Bibliotecas Recomendadas**
+   - [React](https://reactjs.org/) - Framework UI
+   - [TradingView Lightweight Charts](https://github.com/tradingview/lightweight-charts) - Gráficos financieros
+   - [Material-UI](https://mui.com/) - Componentes UI
+   - [D3.js](https://d3js.org/) - Visualizaciones avanzadas
+   - [Socket.io](https://socket.io/) - Comunicación WebSocket
+   - [Redux Toolkit](https://redux-toolkit.js.org/) o [Zustand](https://github.com/pmndrs/zustand) - Gestión de estado
+
+2. **APIs y Protocolos**
+   - REST para operaciones CRUD
+   - WebSockets para actualizaciones en tiempo real
+   - JWT para autenticación
+
+### Métricas de Éxito
+
+1. **Precisión de Predicciones**
+   - Error absoluto medio (MAE) < 2%
+   - Precisión direccional > 60%
+
+2. **Rendimiento de Simulación**
+   - Sharpe ratio > 1.5 para estrategias basadas en IA
+   - Drawdown máximo < 15%
+
+3. **Experiencia de Usuario**
+   - Tiempo de carga inicial < 2 segundos
+   - Tiempo de respuesta para acciones < 200ms
+   - Tasa de error en interacciones < 0.1%

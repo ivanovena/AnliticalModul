@@ -5,6 +5,34 @@ networks:
     driver: bridge
 
 services:
+  # SERVICIO DASHBOARD
+  dashboard:
+    build:
+      context: ./dashboard
+      dockerfile: Dockerfile
+    container_name: ${COMPOSE_PROJECT_NAME:-project7}-dashboard-1
+    restart: always
+    ports:
+      - "3000:80"
+    environment:
+      - REACT_APP_API_URL=http://localhost
+      - REACT_APP_WS_URL=ws://localhost/ws
+      - REACT_APP_INITIAL_CASH=100000
+      - REACT_APP_ENABLE_TELEGRAM=${REACT_APP_ENABLE_TELEGRAM:-false}
+      - REACT_APP_ENABLE_NOTIFICATIONS=${REACT_APP_ENABLE_NOTIFICATIONS:-true}
+    depends_on:
+      - broker
+      - ingestion
+      - streaming
+    networks:
+      - trading_network
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:80"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
   # SERVICIO KAFKA (sin Zookeeper, usando KRaft)
   kafka:
     image: bitnami/kafka:3.4.0
@@ -85,7 +113,7 @@ services:
       - WEBSOCKET_PORT=8080
       - PYTHONUNBUFFERED=1
       - DB_URI=postgresql://market_admin:postgres@postgres:5432/market_data
-      - CORS_ORIGINS=http://localhost:3000,http://127.0.0.1:3000
+      - CORS_ORIGINS=http://localhost:3000,http://127.0.0.1:3000,http://dashboard:80
     networks:
       - trading_network
     extra_hosts:
@@ -162,7 +190,7 @@ services:
       - MAX_RETRIES=30
       - INITIAL_BACKOFF=2
       - PYTHONUNBUFFERED=1
-      - CORS_ORIGINS=http://localhost:3000,http://127.0.0.1:3000
+      - CORS_ORIGINS=http://localhost:3000,http://127.0.0.1:3000,http://dashboard:80
     networks:
       - trading_network
     extra_hosts:
@@ -204,7 +232,7 @@ services:
       - INGESTION_SERVICE_URL=http://ingestion:8000
       - STREAMING_SERVICE_URL=http://streaming:8002
       - OLLAMA_URL=http://host.docker.internal:11434
-      - CORS_ORIGINS=http://localhost:3000,http://127.0.0.1:3000
+      - CORS_ORIGINS=http://localhost:3000,http://127.0.0.1:3000,http://dashboard:80
     networks:
       - trading_network
     extra_hosts:
